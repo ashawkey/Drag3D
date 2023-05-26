@@ -30,6 +30,8 @@ conv2d_gradfix.enabled = True  # Improves training speed.
 grid_sample_gradfix.enabled = True  # Avoids errors with the augmentation pipe.
 
 def safe_normalize(x, eps=1e-20):
+
+
     return x / torch.sqrt(torch.clamp(torch.sum(x * x, -1, keepdim=True), min=eps))
 
 class OrbitCamera:
@@ -114,49 +116,66 @@ class GET3DWrapper:
         for p in self.G.parameters():
             p.requires_grad_(False)
         
+        # some reference for convenience
+        self.num_ws_geo_triplane = self.G.synthesis.generator.tri_plane_synthesis.num_ws_geo
+        self.num_ws_tex_triplane = self.G.synthesis.generator.tri_plane_synthesis.num_ws_tex
+
         self.mesh = None
 
     @torch.no_grad()
     def rgb(self, pos):
         # pos: [N, 3] torch float tensor
-        
+
         # convert back the scale
         pos = pos.unsqueeze(0) # [1, N, 3]
         pos = pos / self.mesh.ori_scale + self.mesh.ori_center
 
         # query triplane feature
-        tex_feat = self.G.synthesis.generator.get_texture_prediction(self.mesh.tex_feature, pos, self.mesh.ws_tex) # [1, N, C]
+        tex_feat = self.G.synthesis.generator.get_texture_prediction(self.mesh.tex_feature, pos, self.mesh.ws_tex_last) # [1, N, C]
 
-        # project to rgb space
-        rgb = self.G.synthesis.to_rgb(tex_feat.permute(0,2,1).contiguous().unsqueeze(-1), self.mesh.ws_tex[:, -1]).squeeze(-1).squeeze(0).t().contiguous() # to_rgb is 1x1 conv
+        # project to rgb space (to_rgb is 1x1 conv, so we can use it as an MLP)
+        rgb = self.G.synthesis.to_rgb(tex_feat.permute(0,2,1).contiguous().unsqueeze(-1), self.mesh.ws_tex_last[:, -1]).squeeze(-1).squeeze(0).t().contiguous()
 
         return rgb
 
-        
     @torch.no_grad()
-    def generate(self, geo_z=None, tex_z=None, use_style_mixing=False):
+    def sample_geo(self, geo_z=None):
 
         if geo_z is None:
             geo_z = torch.randn([1, self.G.z_dim], device=self.device)
         
+        ws_geo = self.G.mapping_geo(geo_z, None, truncation_psi=0.7, truncation_cutoff=None, update_emas=False) # [1, 22, 512]
+        
+        return ws_geo
+    
+    @torch.no_grad()
+    def sample_tex(self, tex_z=None):
+
         if tex_z is None:
             tex_z = torch.randn([1, self.G.z_dim], device=self.device)
-        
-        # break down generation
-        ws_geo = self.G.mapping_geo(geo_z, None, truncation_psi=0.7, truncation_cutoff=None, update_emas=False) # [1, 22, 512]
+
         ws_tex = self.G.mapping(tex_z, None, truncation_psi=0.7, truncation_cutoff=None, update_emas=False) # [1, 9, 512]
 
-        # extract 3D shape
-        # v, f, vt, ft, tex = self.G.synthesis.extract_3d_shape(ws_tex, ws_geo)
+        return ws_tex
+
+    def generate(self, ws_geo=None, ws_tex=None, geo_z=None, tex_z=None):
+        
+        if ws_geo is None:
+            ws_geo = self.sample_geo(geo_z)
+        
+        if ws_tex is None:
+            ws_tex = self.sample_tex(tex_z)
+
+        sdf_feature, tex_feature = self.G.synthesis.generator.get_feature(
+            ws_tex[:, :self.num_ws_tex_triplane], # 7
+            ws_geo[:, :self.num_ws_geo_triplane] # 20
+        ) # [1, 96, 256, 256] x 2, triplane features
+
+        ws_tex_last = ws_tex[:, self.num_ws_tex_triplane:].contiguous() # [1, 2, 512]
+        ws_geo_last = ws_geo[:, self.num_ws_geo_triplane:].contiguous() # [1, 2, 512]
 
         # geometry
-        sdf_feature, tex_feature = self.G.synthesis.generator.get_feature(
-            ws_tex[:, :self.G.synthesis.generator.tri_plane_synthesis.num_ws_tex], # 7
-            ws_geo[:, :self.G.synthesis.generator.tri_plane_synthesis.num_ws_geo] # 20
-        ) # [1, 96, 256, 256] x 2
-        ws_tex = ws_tex[:, self.G.synthesis.generator.tri_plane_synthesis.num_ws_tex:] # [1, 2, 512]
-        ws_geo = ws_geo[:, self.G.synthesis.generator.tri_plane_synthesis.num_ws_geo:] # [1, 2, 512]
-        v, f, sdf, deformation, v_deformed, sdf_reg_loss = self.G.synthesis.get_geometry_prediction(ws_geo, sdf_feature)
+        v, f, sdf, deformation, v_deformed, sdf_reg_loss = self.G.synthesis.get_geometry_prediction(ws_geo_last, sdf_feature)
 
         # build mesh object
         self.mesh = Mesh(v=v[0].float().contiguous(), f=f[0].int().contiguous(), device=self.device)
@@ -164,10 +183,12 @@ class GET3DWrapper:
         self.mesh.auto_normal()
 
         # bind features to mesh for convenience
-        self.mesh.tex_feature = tex_feature
-        self.mesh.sdf_feature = sdf_feature
-        self.mesh.ws_tex = ws_tex
+        # self.mesh.sdf_feature = sdf_feature
         self.mesh.ws_geo = ws_geo
+        # self.mesh.ws_geo_last = ws_geo_last
+        self.mesh.tex_feature = tex_feature
+        self.mesh.ws_tex = ws_tex
+        self.mesh.ws_tex_last = ws_tex_last
 
         return self.mesh
 
@@ -212,8 +233,15 @@ class GUI:
 
         # training stuff
         self.training = False
-        self.step = 0 # training step 
-        self.train_steps = 16
+        self.optimizer = None
+        self.ws_geo_param = None
+        self.ws_geo_nonparam = None
+        self.r1 = 3
+        self.r2 = 12
+
+        self.step = 0
+        self.max_train_step = 1000
+        self.train_steps = 8 # steps per rendering loop (dynamic, will be adjusted automatically)
 
         dpg.create_context()
         self.register_dpg()
@@ -224,22 +252,100 @@ class GUI:
         dpg.destroy_context()
 
 
+    def prepare_train(self):
+        assert self.mesh is not None, 'must generate a mesh before training'
+        assert len(self.points_3d) > 0, 'must mark at least a drag point pair before training'
+
+        # TODO: only optimize the first 6 layers? need to be verified.
+        
+        self.ws_geo_param = torch.nn.Parameter(self.mesh.ws_geo[:, :6].clone()) # [1, 6, 512]
+        self.ws_geo_nonparam = self.mesh.ws_geo[:, 6:].clone() # [1, 16, 512]
+
+        self.optimizer = torch.optim.Adam([self.ws_geo_param], lr=0.01, betas=(0.9, 0.999), eps=1e-8)
+        self.step = 0
+
+
     def train_step(self):
 
         starter, ender = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
         starter.record()
 
-        outputs = self.trainer.train_gui(self.loader, step=self.train_steps)
+        for _ in range(self.train_steps):
+
+            ### 3D patch feature loss
+            # loss --> triplanes (sdf_feature) --> ws_geo
+            ws_geo = torch.cat([self.ws_geo_param, self.ws_geo_nonparam], dim=1)
+            ws_tex = self.mesh.ws_tex
+            sdf_feature, tex_feature = self.model.G.synthesis.generator.get_feature(
+                ws_tex[:, :self.num_ws_tex_triplane], # 7
+                ws_geo[:, :self.num_ws_geo_triplane] # 20
+            ) # [1, 96, 256, 256] x 2, triplane features
+
+            # get drag point pairs (no need to have grad)
+            with torch.no_grad():
+                source_points = torch.tensor(self.points_3d, dtype=torch.float32, device=self.device) # [N, 3]
+                target_points = source_points + torch.tensor(self.points_3d_delta, dtype=torch.float32, device=self.device)
+                directions = safe_normalize(target_points - source_points)
+
+                resolution = sdf_feature.shape[-1] # 256
+                step_size = 2 / resolution # 0.00755
+                
+                # expand source to a patch based on radius
+                p = torch.arange(-self.r1, self.r1+1, device=self.device)
+                px, py, pz = torch.meshgrid(p, p, p)
+                offsets = torch.stack([px.reshape(-1), py.reshape(-1), pz.reshape(-1)], dim=-1) # [B = (2 * r1 + 1) ** 3, 3]
+                patched_points = source_points.unsqueeze(0) + step_size * offsets.unsqueeze(1) # [B, N, 3]
+
+                # shift points
+                shifted_points = patched_points + step_size * directions # [B, N, 3]
+
+            # query feat and calc loss
+            patched_feat = self.model.G.synthesis.generator.get_sdf_def_prediction(self, sdf_feature, patched_points, return_feats=True) # [B, N, C]
+            shifted_feat = self.model.G.synthesis.generator.get_sdf_def_prediction(self, sdf_feature, shifted_points, return_feats=True) # [B, N, C]
+
+            loss = F.l1_loss(shifted_feat, patched_feat.detach())
+
+            # optimize step
+            loss.backward()
+            self.optimizer.step()
+            self.optimizer.zero_grad()
+
+            ### point tracking (update points_3d)
+            with torch.no_grad():
+                source_feat = source_feat[(source_feat.shape[0] - 1) // 2] # [N, C]
+
+                # expand source to a patch based on a larger radius
+                p = torch.arange(-self.r2, self.r2+1, device=self.device)
+                px, py, pz = torch.meshgrid(p, p, p)
+                offsets = torch.stack([px.reshape(-1), py.reshape(-1), pz.reshape(-1)], dim=-1) # [B = (2 * r1 + 1) ** 3, 3]
+                patched_points = source_points.unsqueeze(0) + step_size * offsets.unsqueeze(1) # [B, N, 3]
+
+                patched_feat = self.model.G.synthesis.generator.get_sdf_def_prediction(self, sdf_feature, patched_points, return_feats=True) # [B, N, C]
+
+                # nearest neighbor
+                dist = torch.sum((patched_feat - source_feat) ** 2, dim=-1) # [B, N]
+                indices = torch.argmin(dist, dim=0) # [N]
+
+                # update points_3d and delta
+                new_source_points = torch.gather(patched_points, dim=0, index=indices.view(-1,1,1).repeat(1,1,3)).squeeze(1) # [N, 3]
+                new_points_delta = target_points - new_source_points # [N, 3]
+
+                self.points_3d = new_source_points.cpu().numpy().tolist()
+                self.points_3d_delta = new_points_delta.cpu().numpy().tolist()
 
         ender.record()
         torch.cuda.synchronize()
         t = starter.elapsed_time(ender)
 
         self.step += self.train_steps
+        if self.step > self.max_train_step:
+            self.training = False
+            dpg.configure_item("_button_train", label="start")
+
         self.need_update = True
 
         dpg.set_value("_log_train_time", f'{t:.4f}ms ({int(1000/t)} FPS)')
-        dpg.set_value("_log_train_log", f'step = {self.step: 5d} (+{self.train_steps: 2d}), loss = {outputs["loss"]:.4f}, lr = {outputs["lr"]:.5f}')
+        dpg.set_value("_log_train_log", f'step = {self.step: 5d} (+{self.train_steps: 2d})')
 
         # dynamic train steps
         # max allowed train time per-frame is 500 ms
@@ -410,14 +516,29 @@ class GUI:
                     def callback_get_mesh(sender, app_data, user_data):
                         _t = time.time()
                         dpg.set_value("_log_get_mesh", f'generating...')
-                        self.mesh = self.model.generate()
+
+                        if self.mesh is None or user_data == 0:
+                            self.mesh = self.model.generate()
+                        elif user_data == 1:
+                            self.mesh = self.model.generate(ws_tex=self.mesh.ws_tex)
+                        else:
+                            self.mesh = self.model.generate(ws_geo=self.mesh.ws_geo)
+
                         self.need_update = True
                         self.need_update_overlay = True
                         torch.cuda.synchronize()
                         dpg.set_value("_log_get_mesh", f'generated in {time.time() - _t:.4f}s')
 
-                    dpg.add_button(label="get", tag="_button_get_mesh", callback=callback_get_mesh)
+                    # resample geo & tex
+                    dpg.add_button(label="get", tag="_button_get_mesh", callback=callback_get_mesh, user_data=0)
                     dpg.bind_item_theme("_button_get_mesh", theme_button)
+                    # keep tex, resample geo
+                    dpg.add_button(label="geo", tag="_button_get_mesh_tex", callback=callback_get_mesh, user_data=1)
+                    dpg.bind_item_theme("_button_get_mesh_tex", theme_button)
+                    # keep geo, resample tex
+                    dpg.add_button(label="tex", tag="_button_get_mesh_geo", callback=callback_get_mesh, user_data=2)
+                    dpg.bind_item_theme("_button_get_mesh_geo", theme_button)
+
                     dpg.add_text('', tag="_log_get_mesh")
 
                 # save current mesh
@@ -485,6 +606,7 @@ class GUI:
                             dpg.configure_item("_button_train", label="start")
                         else:
                             self.training = True
+                            self.prepare_train()
                             dpg.configure_item("_button_train", label="stop")
 
                     dpg.add_button(label="start", tag="_button_train", callback=callback_train)

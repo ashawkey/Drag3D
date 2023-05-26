@@ -1515,7 +1515,7 @@ class TriPlaneTexGeo(torch.nn.Module):
         tex_feature = plane_feat[:, self.img_feat_dim * 3:]
         return sdf_feature, tex_feature
 
-    def get_sdf_def_prediction(self, sdf_feature, position, ws_geo):
+    def get_sdf_def_prediction(self, sdf_feature, position, ws_geo=None, return_feats=False):
         '''
         Predicting SDF and deformation for the vertices
         :param sdf_feature: triplane feature for geometry
@@ -1547,6 +1547,10 @@ class TriPlaneTexGeo(torch.nn.Module):
 
         final_feat = (x_feat + y_feat + z_feat)
         final_feat = final_feat.squeeze(dim=2).permute(0, 2, 1)  # 32dimension
+
+        if return_feats:
+            return final_feat
+
         sdf = self.mlp_synthesis_sdf(ws_geo, final_feat)
         deformation = self.mlp_synthesis_def(ws_geo, final_feat)
         return sdf, deformation
