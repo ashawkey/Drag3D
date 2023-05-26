@@ -412,8 +412,7 @@ class DMTETSynthesisNetwork(torch.nn.Module):
                     _tex_hard_mask.unsqueeze(dim=0))
             background_feature = torch.zeros_like(tex_feat)
             # Merge them together
-            img_feat = tex_feat * _tex_hard_mask.unsqueeze(dim=0) + background_feature * (
-                    1 - _tex_hard_mask.unsqueeze(dim=0))
+            img_feat = tex_feat * _tex_hard_mask.unsqueeze(dim=0) + background_feature * (1 - _tex_hard_mask.unsqueeze(dim=0))
             network_out = self.to_rgb(img_feat.permute(0, 3, 1, 2), _ws.unsqueeze(dim=0)[:, -1])
             all_network_output.append(network_out)
         network_out = torch.cat(all_network_output, dim=0)

@@ -114,6 +114,25 @@ class GET3DWrapper:
         for p in self.G.parameters():
             p.requires_grad_(False)
         
+        self.mesh = None
+
+    @torch.no_grad()
+    def rgb(self, pos):
+        # pos: [N, 3] torch float tensor
+        
+        # convert back the scale
+        pos = pos.unsqueeze(0) # [1, N, 3]
+        pos = pos / self.mesh.ori_scale + self.mesh.ori_center
+
+        # query triplane feature
+        tex_feat = self.G.synthesis.generator.get_texture_prediction(self.mesh.tex_feature, pos, self.mesh.ws_tex) # [1, N, C]
+
+        # project to rgb space
+        rgb = self.G.synthesis.to_rgb(tex_feat.permute(0,2,1).contiguous().unsqueeze(-1), self.mesh.ws_tex[:, -1]).squeeze(-1).squeeze(0).t().contiguous() # to_rgb is 1x1 conv
+
+        return rgb
+
+        
     @torch.no_grad()
     def generate(self, geo_z=None, tex_z=None, use_style_mixing=False):
 
@@ -124,21 +143,33 @@ class GET3DWrapper:
             tex_z = torch.randn([1, self.G.z_dim], device=self.device)
         
         # break down generation
-        ws = self.G.mapping(tex_z, None, truncation_psi=0.7, truncation_cutoff=None, update_emas=False) # [1, 9, 512]
         ws_geo = self.G.mapping_geo(geo_z, None, truncation_psi=0.7, truncation_cutoff=None, update_emas=False) # [1, 22, 512]
-        v, f, vt, ft, tex = self.G.synthesis.extract_3d_shape(ws, ws_geo)
+        ws_tex = self.G.mapping(tex_z, None, truncation_psi=0.7, truncation_cutoff=None, update_emas=False) # [1, 9, 512]
 
-        # TODO: ws_geo is what we want to "drag"! [1, 22, 512]
-        # should supervise from tri-plane space, and let it backprop to ws_geo...
+        # extract 3D shape
+        # v, f, vt, ft, tex = self.G.synthesis.extract_3d_shape(ws_tex, ws_geo)
 
-        # process tex 
-        albedo = (tex[0].permute(1,2,0).contiguous() + 1) / 2
+        # geometry
+        sdf_feature, tex_feature = self.G.synthesis.generator.get_feature(
+            ws_tex[:, :self.G.synthesis.generator.tri_plane_synthesis.num_ws_tex], # 7
+            ws_geo[:, :self.G.synthesis.generator.tri_plane_synthesis.num_ws_geo] # 20
+        ) # [1, 96, 256, 256] x 2
+        ws_tex = ws_tex[:, self.G.synthesis.generator.tri_plane_synthesis.num_ws_tex:] # [1, 2, 512]
+        ws_geo = ws_geo[:, self.G.synthesis.generator.tri_plane_synthesis.num_ws_geo:] # [1, 2, 512]
+        v, f, sdf, deformation, v_deformed, sdf_reg_loss = self.G.synthesis.get_geometry_prediction(ws_geo, sdf_feature)
 
         # build mesh object
-        mesh = Mesh.load(v=v[0].float().contiguous(), f=f[0].int().contiguous(), vt=vt[0].float().contiguous(), ft=ft[0].int().contiguous(), albedo=albedo.float().contiguous(), device=self.device)
-        # mesh.auto_normal()
+        self.mesh = Mesh(v=v[0].float().contiguous(), f=f[0].int().contiguous(), device=self.device)
+        self.mesh.auto_size()
+        self.mesh.auto_normal()
 
-        return mesh, geo_z, tex_z
+        # bind features to mesh for convenience
+        self.mesh.tex_feature = tex_feature
+        self.mesh.sdf_feature = sdf_feature
+        self.mesh.ws_tex = ws_tex
+        self.mesh.ws_geo = ws_geo
+
+        return self.mesh
 
     
 class GUI:
@@ -167,8 +198,6 @@ class GUI:
         self.model = GET3DWrapper(self.device, G_kwargs=opt.G_kwargs, resume_pretrain=opt.resume_pretrain)
 
         # current generated mesh and latent codes
-        self.geo_z = None
-        self.tex_z = None
         self.mesh = None
 
         # drag stuff
@@ -248,8 +277,16 @@ class GUI:
                     depth = rast[0, :, :, [2]]  # [H, W, 1]
                     buffer_image = depth.detach().cpu().numpy().repeat(3, -1) # [H, W, 3]
                 else:
-                    texc, _ = dr.interpolate(self.mesh.vt.unsqueeze(0).contiguous(), rast, self.mesh.ft)
-                    albedo = dr.texture(self.mesh.albedo.unsqueeze(0), texc, filter_mode='linear') # [1, H, W, 3]
+                    # texc, _ = dr.interpolate(self.mesh.vt.unsqueeze(0).contiguous(), rast, self.mesh.ft)
+                    # albedo = dr.texture(self.mesh.albedo.unsqueeze(0), texc, filter_mode='linear') # [1, H, W, 3]
+                    pos, _ = dr.interpolate(self.mesh.v.unsqueeze(0), rast, self.mesh.f) # [1, H, W, 3]
+                    pos = pos.view(-1, 3)
+                    mask = (rast[0, :, :, 3] > 0).view(-1)
+                    albedo = torch.zeros_like(pos, dtype=torch.float32)
+                    if mask.any():
+                        albedo[mask] = self.model.rgb(pos[mask])
+                    albedo = albedo.view(1, self.H, self.W, 3)
+
                     albedo = torch.where(rast[..., 3:] > 0, albedo, torch.tensor(0).to(albedo.device)) # remove background
                     albedo = dr.antialias(albedo, rast, v_clip, self.mesh.f).clamp(0, 1) # [1, H, W, 3]
                     if self.mode == 'albedo':
@@ -373,7 +410,7 @@ class GUI:
                     def callback_get_mesh(sender, app_data, user_data):
                         _t = time.time()
                         dpg.set_value("_log_get_mesh", f'generating...')
-                        self.mesh, self.geo_z, self.tex_z = self.model.generate()
+                        self.mesh = self.model.generate()
                         self.need_update = True
                         self.need_update_overlay = True
                         torch.cuda.synchronize()

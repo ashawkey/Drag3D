@@ -1556,7 +1556,7 @@ class TriPlaneTexGeo(torch.nn.Module):
         Predict texture for the surface points
         :param tex_feature: triplane feature for the texture
         :param position: position for the surface points
-        :param ws_tex: latent code for geometry
+        :param ws_tex: latent code for texture
         :return:
         '''
         tri_plane = torch.split(tex_feature, self.img_feat_dim, dim=1)

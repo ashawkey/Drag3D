@@ -219,9 +219,9 @@ class Mesh():
     @torch.no_grad()
     def auto_size(self): 
         vmin, vmax = self.aabb()
-        scale = 1.2 / torch.max(vmax - vmin).item()
-        self.v = self.v - (vmax + vmin) / 2  # Center mesh on origin
-        self.v = self.v * scale
+        self.ori_center = (vmax + vmin) / 2
+        self.ori_scale = 1.2 / torch.max(vmax - vmin).item()
+        self.v = (self.v - self.ori_center) * self.ori_scale
 
     def auto_normal(self):
         i0, i1, i2 = self.f[:, 0].long(), self.f[:, 1].long(), self.f[:, 2].long()
