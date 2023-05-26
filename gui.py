@@ -2,6 +2,7 @@ import math
 import torch
 import torch.nn.functional as F
 import numpy as np
+from skimage.draw import line_aa
 import dearpygui.dearpygui as dpg
 from scipy.spatial.transform import Rotation as R
 import nvdiffrast.torch as dr
@@ -122,9 +123,7 @@ class GET3DWrapper:
         if tex_z is None:
             tex_z = torch.randn([1, self.G.z_dim], device=self.device)
         
-        
         # break down generation
-        # generated_mesh = self.G.generate_3d_mesh(geo_z=geo_z, tex_z=tex_z, c=None, truncation_psi=0.7, use_style_mixing=use_style_mixing)
         ws = self.G.mapping(tex_z, None, truncation_psi=0.7, truncation_cutoff=None, update_emas=False) # [1, 9, 512]
         ws_geo = self.G.mapping_geo(geo_z, None, truncation_psi=0.7, truncation_cutoff=None, update_emas=False) # [1, 22, 512]
         v, f, vt, ft, tex = self.G.synthesis.extract_3d_shape(ws, ws_geo)
@@ -149,12 +148,17 @@ class GUI:
         self.H = opt.H
         self.cam = OrbitCamera(opt.W, opt.H, r=opt.radius, fovy=opt.fovy)
         self.bg_color = torch.ones(3, dtype=torch.float32) # default white bg
-        self.render_buffer = np.zeros((self.W, self.H, 3), dtype=np.float32)
-        self.need_update = True # camera moved, should reset accumulation
         self.light_dir = np.array([0, 0])
         self.ambient_ratio = 0.5
         self.mode = 'lambertian'
         self.debug = debug
+
+        self.buffer_image = np.zeros((self.W, self.H, 3), dtype=np.float32)
+        self.buffer_overlay = np.zeros((self.W, self.H, 3), dtype=np.float32)
+        self.buffer_rast = None
+
+        self.need_update = True # update buffer_image
+        self.need_update_overlay = True # update buffer_overlay
 
         self.glctx = dr.RasterizeCudaContext() # dr.RasterizeGLContext()
 
@@ -166,6 +170,16 @@ class GUI:
         self.geo_z = None
         self.tex_z = None
         self.mesh = None
+
+        # drag stuff
+        self.mouse_loc = np.array([0, 0])
+        self.point_2d = []
+        self.point_idx = 0
+
+        self.point_3d = [0, 0, 0]
+        self.points_3d = []
+        self.points_mask = []
+        self.points_3d_delta = []
 
         # training stuff
         self.training = False
@@ -208,60 +222,111 @@ class GUI:
     
     @torch.no_grad()
     def test_step(self):
+        
+        # ignore if no need to update
+        if not self.need_update and not self.need_update_overlay:
+            return
 
+        starter, ender = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
+        starter.record()
+
+        # should update image
         if self.need_update:
 
-            if self.mesh is None:
-                return
-        
-            starter, ender = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
-            starter.record()
+            if self.mesh is not None:
 
-            # do MVP for vertices
-            mv = torch.from_numpy(self.cam.view).cuda() # [4, 4]
-            proj = torch.from_numpy(self.cam.perspective).cuda() # [4, 4]
-            mvp = proj @ mv
-            
-            v_clip = torch.matmul(F.pad(self.mesh.v, pad=(0, 1), mode='constant', value=1.0),
-                              torch.transpose(mvp, 0, 1)).float().unsqueeze(0)  # [1, N, 4]
+                # do MVP for vertices
+                mv = torch.from_numpy(self.cam.view).cuda() # [4, 4]
+                proj = torch.from_numpy(self.cam.perspective).cuda() # [4, 4]
+                mvp = proj @ mv
+                
+                v_clip = torch.matmul(F.pad(self.mesh.v, pad=(0, 1), mode='constant', value=1.0), torch.transpose(mvp, 0, 1)).float().unsqueeze(0)  # [1, N, 4]
 
-            rast, rast_db = dr.rasterize(self.glctx, v_clip, self.mesh.f, (self.H, self.W))
-            
-            if self.mode == 'depth':
-                depth = rast[0, :, :, [2]]  # [H, W, 1]
-                buffer = depth.detach().cpu().numpy().repeat(3, -1) # [H, W, 3]
-            else:
-                texc, _ = dr.interpolate(self.mesh.vt.unsqueeze(0).contiguous(), rast, self.mesh.ft)
-                albedo = dr.texture(self.mesh.albedo.unsqueeze(0), texc, filter_mode='linear') # [1, H, W, 3]
-                albedo = torch.where(rast[..., 3:] > 0, albedo, torch.tensor(0).to(albedo.device)) # remove background
-                albedo = dr.antialias(albedo, rast, v_clip, self.mesh.f).clamp(0, 1) # [1, H, W, 3]
-                if self.mode == 'albedo':
-                    buffer = albedo[0].detach().cpu().numpy()
+                rast, rast_db = dr.rasterize(self.glctx, v_clip, self.mesh.f, (self.H, self.W))
+                
+                if self.mode == 'depth':
+                    depth = rast[0, :, :, [2]]  # [H, W, 1]
+                    buffer_image = depth.detach().cpu().numpy().repeat(3, -1) # [H, W, 3]
                 else:
-                    normal, _ = dr.interpolate(self.mesh.vn.unsqueeze(0).contiguous(), rast, self.mesh.fn)
-                    normal = safe_normalize(normal)
-                    if self.mode == 'normal':
-                        buffer = (normal[0].detach().cpu().numpy() + 1) / 2
-                    elif self.mode == 'lambertian':
-                        light_d = np.deg2rad(self.light_dir)
-                        light_d = np.array([
-                            np.sin(light_d[0]) * np.sin(light_d[1]),
-                            np.cos(light_d[0]),
-                            np.sin(light_d[0]) * np.cos(light_d[1]),
-                        ], dtype=np.float32)
-                        light_d = torch.from_numpy(light_d).to(albedo.device)
-                        lambertian = self.ambient_ratio + (1 - self.ambient_ratio)  * (normal @ light_d).float().clamp(min=0)
-                        buffer = (albedo * lambertian.unsqueeze(-1))[0].detach().cpu().numpy()
-
-            ender.record()
-            torch.cuda.synchronize()
-            t = starter.elapsed_time(ender)
-
-            self.render_buffer = buffer
+                    texc, _ = dr.interpolate(self.mesh.vt.unsqueeze(0).contiguous(), rast, self.mesh.ft)
+                    albedo = dr.texture(self.mesh.albedo.unsqueeze(0), texc, filter_mode='linear') # [1, H, W, 3]
+                    albedo = torch.where(rast[..., 3:] > 0, albedo, torch.tensor(0).to(albedo.device)) # remove background
+                    albedo = dr.antialias(albedo, rast, v_clip, self.mesh.f).clamp(0, 1) # [1, H, W, 3]
+                    if self.mode == 'albedo':
+                        buffer_image = albedo[0].detach().cpu().numpy()
+                    else:
+                        normal, _ = dr.interpolate(self.mesh.vn.unsqueeze(0).contiguous(), rast, self.mesh.fn)
+                        normal = safe_normalize(normal)
+                        if self.mode == 'normal':
+                            buffer_image = (normal[0].detach().cpu().numpy() + 1) / 2
+                        elif self.mode == 'lambertian':
+                            light_d = np.deg2rad(self.light_dir)
+                            light_d = np.array([
+                                np.sin(light_d[0]) * np.sin(light_d[1]),
+                                np.cos(light_d[0]),
+                                np.sin(light_d[0]) * np.cos(light_d[1]),
+                            ], dtype=np.float32)
+                            light_d = torch.from_numpy(light_d).to(albedo.device)
+                            lambertian = self.ambient_ratio + (1 - self.ambient_ratio)  * (normal @ light_d).float().clamp(min=0)
+                            buffer_image = (albedo * lambertian.unsqueeze(-1))[0].detach().cpu().numpy()
+                
+                self.buffer_image = buffer_image
+                self.buffer_rast = rast
             self.need_update = False
-            
-            dpg.set_value("_log_infer_time", f'{t:.4f}ms ({int(1000/t)} FPS)')
-            dpg.set_value("_texture", self.render_buffer)
+
+        # should update overlay
+        if self.need_update_overlay:
+            buffer_overlay = np.zeros_like(self.buffer_overlay)
+
+            mask = np.array(self.points_mask).astype(bool)
+            if mask.any():
+                
+                # do mvp transform for keypoints
+                mv = self.cam.view # [4, 4]
+                proj = self.cam.perspective # [4, 4]
+                mvp = proj @ mv
+
+                source_points = np.array(self.points_3d)[mask]
+                target_points = source_points + np.array(self.points_3d_delta)[mask]
+
+                source_points_clip = np.matmul(np.pad(source_points, ((0, 0), (0, 1)), constant_values=1.0), mvp.T)  # [N, 4]
+                target_points_clip = np.matmul(np.pad(target_points, ((0, 0), (0, 1)), constant_values=1.0), mvp.T)  # [N, 4]
+                source_points_clip[:, :3] /= source_points_clip[:, 3:] # perspective division
+                target_points_clip[:, :3] /= target_points_clip[:, 3:] # perspective division
+
+                source_points_2d = ((source_points_clip[:, :2] + 1) / 2 * np.array([self.H, self.W])).round().astype(np.int32)
+                target_points_2d = ((target_points_clip[:, :2] + 1) / 2 * np.array([self.H, self.W])).round().astype(np.int32)
+
+                # depth test ?
+                # source_points_depth = source_points_clip[:, 2]
+                # actual_depth = self.buffer_rast[0, :, :, 2]
+
+                radius = int((self.H + self.W) / 2 * 0.005)
+                for i in range(len(source_points_clip)):
+                    # draw each point
+                    if source_points_2d[i, 0] >= radius and source_points_2d[i, 0] < self.W - radius and source_points_2d[i, 1] >= radius and source_points_2d[i, 1] < self.H - radius:
+                        buffer_overlay[source_points_2d[i, 1]-radius:source_points_2d[i, 1]+radius, source_points_2d[i, 0]-radius:source_points_2d[i, 0]+radius] += np.array([1,0,0])
+                        # draw target 
+                        if target_points_2d[i, 0] >= radius and target_points_2d[i, 0] < self.W - radius and target_points_2d[i, 1] >= radius and target_points_2d[i, 1] < self.H - radius:
+                            buffer_overlay[target_points_2d[i, 1]-radius:target_points_2d[i, 1]+radius, target_points_2d[i, 0]-radius:target_points_2d[i, 0]+radius] += np.array([0,0,1])
+                            # draw line
+                            rr, cc, val = line_aa(source_points_2d[i, 1], source_points_2d[i, 0], target_points_2d[i, 1], target_points_2d[i, 0])
+                            buffer_overlay[rr, cc] += val[..., None] * np.array([0,1,0])
+
+            self.buffer_overlay = buffer_overlay
+            self.need_update_overlay = False
+
+        ender.record()
+        torch.cuda.synchronize()
+        t = starter.elapsed_time(ender)
+        dpg.set_value("_log_infer_time", f'{t:.4f}ms ({int(1000/t)} FPS)')
+
+        # mix image and overlay
+        # buffer = np.clip(self.buffer_image + self.buffer_overlay, 0, 1)
+        overlay_mask = self.buffer_overlay.sum(axis=-1, keepdims=True) == 0
+        buffer = self.buffer_image * overlay_mask + self.buffer_overlay
+
+        dpg.set_value("_texture", buffer)
 
         
     def register_dpg(self):
@@ -269,7 +334,7 @@ class GUI:
         ### register texture 
 
         with dpg.texture_registry(show=False):
-            dpg.add_raw_texture(self.W, self.H, self.render_buffer, format=dpg.mvFormat_Float_rgb, tag="_texture")
+            dpg.add_raw_texture(self.W, self.H, self.buffer_image, format=dpg.mvFormat_Float_rgb, tag="_texture")
 
         ### register window
 
@@ -310,6 +375,7 @@ class GUI:
                         dpg.set_value("_log_get_mesh", f'generating...')
                         self.mesh, self.geo_z, self.tex_z = self.model.generate()
                         self.need_update = True
+                        self.need_update_overlay = True
                         torch.cuda.synchronize()
                         dpg.set_value("_log_get_mesh", f'generated in {time.time() - _t:.4f}s')
 
@@ -330,8 +396,49 @@ class GUI:
                     dpg.bind_item_theme("_button_save_mesh", theme_button)
                     dpg.add_text('', tag="_log_save_mesh")
             
-            # train stuff
+            # drag stuff
             with dpg.collapsing_header(label="Drag", default_open=True):
+
+                # keypoints list
+                def callback_update_keypoint_delta(sender, app_data, user_data):
+                    self.points_3d_delta[user_data] = app_data[:3]
+                    # update rendering
+                    self.need_update_overlay = True
+
+                def callback_delete_keypoint(sender, app_data, user_data):
+                    # update states (not really delete since we rely on id... just mark it as deleted)
+                    self.points_mask[user_data] = False
+                    # update UI (delete group by tag)
+                    dpg.delete_item(f"_group_keypoint_{user_data}")
+                    # update rendering
+                    self.need_update_overlay = True
+
+                def callback_add_keypoint(sender, app_data):
+                    # update states
+                    self.points_3d.append(self.point_3d)
+                    self.points_mask.append(True)
+                    self.points_3d_delta.append([0,0,0])
+                    # update UI
+                    _id = len(self.points_3d) - 1
+                    dpg.add_group(parent="_group_keypoints", tag=f"_group_keypoint_{_id}", horizontal=True)
+                    dpg.add_text(parent=f"_group_keypoint_{_id}", default_value=f"{', '.join([f'{x:.3f}' for x in self.points_3d[_id]])} +")
+                    dpg.add_input_floatx(parent=f"_group_keypoint_{_id}", size=3, width=200, format="%.3f", on_enter=True, default_value=self.points_3d_delta[_id], callback=callback_update_keypoint_delta, user_data=_id)
+                    dpg.add_button(parent=f"_group_keypoint_{_id}", label="Del", callback=callback_delete_keypoint, user_data=_id)
+                    # update rendering
+                    self.need_update_overlay = True
+
+                def callback_update_new_keypoint(sender, app_data):
+                    self.point_3d = app_data[:3]
+
+                with dpg.group(horizontal=True):
+                    dpg.add_text("Keypoint: ")
+                    dpg.add_input_floatx(default_value=self.point_3d, size=3, width=200, format="%.3f", on_enter=False, callback=callback_update_new_keypoint)
+                    dpg.add_button(label="Add", tag="_button_add_keypoint", callback=callback_add_keypoint)
+
+                # empty group as a handler
+                dpg.add_group(tag="_group_keypoints")
+                
+                # train stuff
                 with dpg.group(horizontal=True):
                     dpg.add_text("Train: ")
 
@@ -356,6 +463,7 @@ class GUI:
                 def callback_change_mode(sender, app_data):
                     self.mode = app_data
                     self.need_update = True
+                    self.need_update_overlay = True
                 
                 dpg.add_combo(('albedo', 'depth', 'normal', 'lambertian'), label='mode', default_value=self.mode, callback=callback_change_mode)
 
@@ -363,6 +471,7 @@ class GUI:
                 def callback_set_fovy(sender, app_data):
                     self.cam.fovy = app_data
                     self.need_update = True
+                    self.need_update_overlay = True
 
                 dpg.add_slider_int(label="FoV (vertical)", min_value=1, max_value=120, format="%d deg", default_value=self.cam.fovy, callback=callback_set_fovy)
 
@@ -408,6 +517,7 @@ class GUI:
 
             self.cam.orbit(dx, dy)
             self.need_update = True
+            self.need_update_overlay = True
 
             if self.debug:
                 dpg.set_value("_log_pose", str(self.cam.pose))
@@ -422,6 +532,7 @@ class GUI:
 
             self.cam.scale(delta)
             self.need_update = True
+            self.need_update_overlay = True
 
             if self.debug:
                 dpg.set_value("_log_pose", str(self.cam.pose))
@@ -437,15 +548,52 @@ class GUI:
 
             self.cam.pan(dx, dy)
             self.need_update = True
+            self.need_update_overlay = True
 
             if self.debug:
                 dpg.set_value("_log_pose", str(self.cam.pose))
 
+        # def callback_set_mouse_loc(sender, app_data):
+
+        #     if not dpg.is_item_focused("_primary_window"):
+        #         return
+
+        #     # just the pixel coordinate in image
+        #     self.mouse_loc = np.array(app_data)
+
+        # def callback_keypoint_add(sender, app_data):
+
+        #     if not dpg.is_item_focused("_primary_window"):
+        #         return
+            
+        #     # project mouse_loc to points_3d
+        #     self.buffer_rast[0, self.mouse_loc[0], self.mouse_loc[1], ]
+
+        #     dist = np.linalg.norm(self.point_2d - self.mouse_loc, axis=1) # [18]
+        #     self.point_idx = np.argmin(dist)
+        
+        # def callback_keypoint_drag(sender, app_data):
+
+        #     if not dpg.is_item_focused("_primary_window"):
+        #         return
+
+        #     # 2D to 3D delta
+        #     dx = app_data[1]
+        #     dy = app_data[2]
+        
+        #     self.points_3d[self.point_idx, :3] += 0.0001 * self.cam.rot.as_matrix()[:3, :3] @ np.array([dx, -dy, 0])
+
+        #     self.need_update = True
 
         with dpg.handler_registry():
             dpg.add_mouse_drag_handler(button=dpg.mvMouseButton_Left, callback=callback_camera_drag_rotate)
             dpg.add_mouse_wheel_handler(callback=callback_camera_wheel_scale)
-            dpg.add_mouse_drag_handler(button=dpg.mvMouseButton_Right, callback=callback_camera_drag_pan)
+            dpg.add_mouse_drag_handler(button=dpg.mvMouseButton_Middle, callback=callback_camera_drag_pan)
+
+            # for skeleton editing
+            # dpg.add_mouse_move_handler(callback=callback_set_mouse_loc)
+            # dpg.add_mouse_click_handler(button=dpg.mvMouseButton_Right, callback=callback_keypoint_add)
+            # dpg.add_mouse_drag_handler(button=dpg.mvMouseButton_Right, callback=callback_keypoint_drag)
 
         
         dpg.create_viewport(title='Drag3D', width=self.W, height=self.H, resizable=False)
