@@ -236,7 +236,7 @@ class GUI:
         self.optimizer = None
         self.ws_geo_param = None
         self.ws_geo_nonparam = None
-        self.r1 = 3
+        self.r1 = 5 # 3
         self.r2 = 9 # 12
 
         self.offsets1 = make_offsets(self.r1, self.device)
@@ -259,7 +259,7 @@ class GUI:
         assert len(self.points_mask) > 0 and np.any(self.points_mask), 'must mark at least a drag point pair before training'
 
         # TODO: only optimize the first 6 layers? need to be verified.
-        layers_to_opt = 6 # range in [1, 20]
+        layers_to_opt = 20 # range in [1, 20]
         self.ws_geo_param = torch.nn.Parameter(self.mesh.ws_geo[:, :layers_to_opt].clone()) # [1, l, 512]
         self.ws_geo_nonparam = self.mesh.ws_geo[:, layers_to_opt:].clone() # [1, 22-l, 512]
 
@@ -293,7 +293,7 @@ class GUI:
                 directions = safe_normalize(target_points - source_points)
 
                 resolution = sdf_feature.shape[-1] # 256
-                step_size = 2 / resolution
+                step_size = 0.1 / resolution # critical! should be small enough to make point tracking possible
                 
                 # expand source to a patch based on radius
                 patched_points = source_points.unsqueeze(0) + step_size * self.offsets1.unsqueeze(1) # [B, N, 3]
@@ -335,21 +335,11 @@ class GUI:
                 dist = torch.mean((new_patched_feat - source_feat) ** 2, dim=-1) # [B, N]
                 # dist[(B - 1) // 2] = 1e8 # forbid always staying in the same point...
                 indices = torch.argmin(dist, dim=0) # [N]
-
-                # print(source_feat.shape, new_patched_feat.shape, dist.shape)
-                # print(source_feat)
-                # print(new_patched_feat)
-                # print(dist)
                 # print(indices)
 
                 # update points_3d and delta
                 new_source_points = torch.gather(patched_points, dim=0, index=indices.view(1,-1,1).repeat(1,1,3)).squeeze(1) # [N, 3]
                 new_points_delta = target_points - new_source_points # [N, 3]
-
-                # print(source_points)
-                # print(patched_points[(B - 1) // 2])
-                print(indices)
-                # print(new_source_points)
 
                 # need to add back those deleted points... this should be improved...
                 new_source_points_with_deleted = np.array(self.points_3d)
@@ -397,7 +387,7 @@ class GUI:
         dpg.set_value("_log_train_time", f'{t:.4f}ms ({int(1000/t)} FPS)')
         dpg.set_value("_log_train_log", f'step = {self.step: 5d} (+{self.train_steps: 2d}) loss = {loss.item():.4f}')
 
-        # dynamic train steps
+        # dynamic train steps (no need for now)
         # max allowed train time per-frame is 500 ms
         # full_t = t / self.train_steps * 16
         # train_steps = min(16, max(4, int(16 * 500 / full_t)))
@@ -843,7 +833,7 @@ class GUI:
             dx = app_data[1]
             dy = app_data[2]
 
-            delta = 0.0001 * self.cam.rot.as_matrix()[:3, :3] @ np.array([dx, -dy, 0])
+            delta = 0.00002 * self.cam.rot.as_matrix()[:3, :3] @ np.array([dx, -dy, 0])
         
             self.points_3d_delta[self.point_idx][0] += delta[0]
             self.points_3d_delta[self.point_idx][1] += delta[1]
