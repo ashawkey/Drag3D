@@ -88,7 +88,7 @@ class DMTETSynthesisNetwork(torch.nn.Module):
                 w_dim=w_dim,
                 img_channels=self.feat_channel,
                 shape_min=shape_min,
-                shape_lenght=shaape_lenght,
+                shape_length=shaape_lenght,
                 tri_plane_resolution=tri_plane_resolution,
                 device=self.device,
                 mlp_latent_channel=self.mlp_latent_channel,
@@ -101,7 +101,7 @@ class DMTETSynthesisNetwork(torch.nn.Module):
                 shaape_lenght = shape_max.max() - shape_min
                 self.geometry_synthesis_sdf = Conv3DImplicitSynthesisNetwork(
                     shape_min=shape_min,
-                    shape_lenght=shaape_lenght,
+                    shape_length=shaape_lenght,
                     out_channels=1,
                     n_layers=3,
                     w_dim=self.w_dim,
@@ -110,7 +110,7 @@ class DMTETSynthesisNetwork(torch.nn.Module):
                     device=self.device)  # use 1x1 cov to improve it (toRGB)
                 self.geometry_synthesis_def = Conv3DImplicitSynthesisNetwork(
                     shape_min=shape_min,
-                    shape_lenght=shaape_lenght,
+                    shape_length=shaape_lenght,
                     out_channels=3,
                     n_layers=2,
                     w_dim=self.w_dim,
@@ -128,7 +128,7 @@ class DMTETSynthesisNetwork(torch.nn.Module):
                 self.geometry_synthesis_tex = TriPlaneTex(
                     w_dim=w_dim, img_channels=self.feat_channel,
                     shape_min=shape_min,
-                    shape_lenght=shaape_lenght,
+                    shape_length=shaape_lenght,
                     tri_plane_resolution=tri_plane_resolution,
                     device=self.device,
                     mlp_latent_channel=self.mlp_latent_channel,

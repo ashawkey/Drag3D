@@ -1245,14 +1245,14 @@ class Conv3DImplicitSynthesisNetwork(torch.nn.Module):
             n_layers=4,
             voxel_resolution=32,
             shape_min=-1.0,
-            shape_lenght=2.0,
+            shape_length=2.0,
             device='cuda',
             **block_kwargs,  # Arguments for SynthesisBlock.
     ):
 
         # 3D convolution to get rough shapes
         self.shape_min = shape_min
-        self.shape_lenght = shape_lenght
+        self.shape_length = shape_length
         self.w_dim = w_dim
         self.out_channels = out_channels
         assert voxel_resolution >= 4 and voxel_resolution & (voxel_resolution - 1) == 0
@@ -1331,7 +1331,7 @@ class Conv3DImplicitSynthesisNetwork(torch.nn.Module):
             block = getattr(self, f'b{res}')
             x, img = block(x, img, cur_ws, **block_kwargs)
 
-        normalized_tex_pos = (tex_pos - self.shape_min) / self.shape_lenght
+        normalized_tex_pos = (tex_pos - self.shape_min) / self.shape_length
         normalized_tex_pos = torch.clamp(normalized_tex_pos, 0, 1)
         normalized_tex_pos = normalized_tex_pos.reshape(
             normalized_tex_pos.shape[0], normalized_tex_pos.shape[1], 1, 1, 3) * 2.0 - 1.0
@@ -1356,7 +1356,7 @@ class TriPlaneTex(torch.nn.Module):
             w_dim,  # Intermediate latent (W) dimensionality.
             img_channels,  # Number of color channels.
             shape_min=-1.0,
-            shape_lenght=2.0,
+            shape_length=2.0,
             tri_plane_resolution=128,
             device='cuda',
             mlp_latent_channel=256,
@@ -1369,7 +1369,7 @@ class TriPlaneTex(torch.nn.Module):
         self.w_dim = w_dim
         self.tri_plane_resolution = tri_plane_resolution
         self.shape_min = shape_min
-        self.shape_lenght = shape_lenght
+        self.shape_length = shape_length
 
         self.w_dim = w_dim * 2
 
@@ -1413,7 +1413,7 @@ class TriPlaneTex(torch.nn.Module):
         plane_feat = self.tri_plane_synthesis(ws[:, :self.num_ws_tri_plane], **block_kwargs)
         tri_plane = torch.split(plane_feat, self.img_feat_dim, dim=1)
 
-        normalized_tex_pos = (position - self.shape_min) / self.shape_lenght
+        normalized_tex_pos = (position - self.shape_min) / self.shape_length
         normalized_tex_pos = torch.clamp(normalized_tex_pos, 0, 1)
         normalized_tex_pos = normalized_tex_pos * 2.0 - 1.0
         x_feat = grid_sample_gradfix.grid_sample(
@@ -1449,7 +1449,7 @@ class TriPlaneTexGeo(torch.nn.Module):
             w_dim,  # Intermediate latent (W) dimensionality.
             img_channels,  # Number of color channels.
             shape_min=-1.0,
-            shape_lenght=2.0,
+            shape_length=2.0,
             tri_plane_resolution=128,
             device='cuda',
             mlp_latent_channel=256,
@@ -1463,7 +1463,7 @@ class TriPlaneTexGeo(torch.nn.Module):
 
         self.tri_plane_resolution = tri_plane_resolution
         self.shape_min = shape_min
-        self.shape_lenght = shape_lenght
+        self.shape_length = shape_length
 
         self.tri_plane_synthesis = SynthesisNetworkTexGeo(
             w_dim=self.w_dim, img_resolution=self.tri_plane_resolution,
@@ -1524,7 +1524,7 @@ class TriPlaneTexGeo(torch.nn.Module):
         :return:
         '''
         tri_plane = torch.split(sdf_feature, self.img_feat_dim, dim=1)
-        normalized_tex_pos = (position - self.shape_min) / self.shape_lenght
+        normalized_tex_pos = (position - self.shape_min) / self.shape_length
         normalized_tex_pos = torch.clamp(normalized_tex_pos, 0, 1)
         normalized_tex_pos = normalized_tex_pos * 2.0 - 1.0
         x_feat = grid_sample_gradfix.grid_sample(
@@ -1564,7 +1564,7 @@ class TriPlaneTexGeo(torch.nn.Module):
         :return:
         '''
         tri_plane = torch.split(tex_feature, self.img_feat_dim, dim=1)
-        normalized_tex_pos = (position - self.shape_min) / self.shape_lenght
+        normalized_tex_pos = (position - self.shape_min) / self.shape_length
         normalized_tex_pos = torch.clamp(normalized_tex_pos, 0, 1)
         normalized_tex_pos = normalized_tex_pos * 2.0 - 1.0
         x_feat = grid_sample_gradfix.grid_sample(

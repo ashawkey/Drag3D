@@ -28,6 +28,9 @@ class Mesh():
         self.ft = ft
         # only support a single albedo
         self.albedo = albedo
+
+        self.ori_center = 0
+        self.ori_scale = 1
     
     @classmethod
     def load(cls, path=None, **kwargs):
