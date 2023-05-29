@@ -123,15 +123,13 @@ class GET3DWrapper:
     @torch.no_grad()
     def rgb(self, pos):
         # pos: [N, 3] torch float tensor
-
-        # convert back the scale
-        pos = pos.unsqueeze(0) # [1, N, 3]
-
+        
         # query triplane feature
-        tex_feat = self.G.synthesis.generator.get_texture_prediction(self.mesh.tex_feature, pos, self.mesh.ws_tex_last) # [1, N, C]
+        tex_feat = self.G.synthesis.generator.get_texture_prediction(self.mesh.tex_feature, pos.unsqueeze(0), self.mesh.ws_tex_last) # [1, N, C]
 
         # project to rgb space (to_rgb is 1x1 conv, so we can use it as an MLP)
         rgb = self.G.synthesis.to_rgb(tex_feat.permute(0,2,1).contiguous().unsqueeze(-1), self.mesh.ws_tex_last[:, -1]).squeeze(-1).squeeze(0).t().contiguous()
+        rgb = (rgb + 1) / 2
 
         return rgb
 
@@ -195,7 +193,7 @@ def make_offsets(r, device):
     return offsets
 
 class GUI:
-    def __init__(self, opt, debug=True):
+    def __init__(self, opt):
         self.opt = opt # shared with the trainer's opt to support in-place modification of rendering parameters.
         self.W = opt.W
         self.H = opt.H
@@ -204,11 +202,11 @@ class GUI:
         self.light_dir = np.array([0, 0])
         self.mode = 'albedo'
         self.ambient_ratio = 0.5
-        self.debug = debug
+        self.save_path = 'mesh.obj'
 
         self.buffer_image = np.ones((self.W, self.H, 3), dtype=np.float32)
         self.buffer_overlay = np.zeros((self.W, self.H, 3), dtype=np.float32)
-        self.buffer_rast = None
+        self.buffer_rast = None # for 2D to 3D projection
 
         self.need_update = True # update buffer_image
         self.need_update_overlay = True # update buffer_overlay
@@ -236,7 +234,7 @@ class GUI:
         self.optimizer = None
         self.ws_geo_param = None
         self.ws_geo_nonparam = None
-        self.r1 = 5 # 3
+        self.r1 = 3 # 3
         self.r2 = 9 # 12
 
         self.offsets1 = make_offsets(self.r1, self.device)
@@ -258,8 +256,8 @@ class GUI:
         assert self.mesh is not None, 'must generate a mesh before training'
         assert len(self.points_mask) > 0 and np.any(self.points_mask), 'must mark at least a drag point pair before training'
 
-        # TODO: only optimize the first 6 layers? need to be verified.
-        layers_to_opt = 20 # range in [1, 20]
+        # TODO: optimize how many layers? need to be verified...
+        layers_to_opt = 20 # range in [1, 20], last two layers are fixed
         self.ws_geo_param = torch.nn.Parameter(self.mesh.ws_geo[:, :layers_to_opt].clone()) # [1, l, 512]
         self.ws_geo_nonparam = self.mesh.ws_geo[:, layers_to_opt:].clone() # [1, 22-l, 512]
 
@@ -592,14 +590,79 @@ class GUI:
                 with dpg.group(horizontal=True):
                     dpg.add_text("Save Mesh: ")
 
+                    def callback_set_save_path(sender, app_data):
+                        self.save_path = app_data
+
                     def callback_save_mesh(sender, app_data):
-                        # TODO: allow set save path
-                        self.mesh.write('mesh.obj')
-                        dpg.set_value("_log_save_mesh", f'saved mesh!')
+                        os.makedirs(self.opt.outdir, exist_ok=True)
+                        path = os.path.join(self.opt.outdir, self.save_path)
+                        print(f'[INFO] save mesh to {path}...')
+
+                        # hardcoded texture resolution
+                        h = w = 2048
+
+                        # unwrap uv
+                        self.mesh.auto_uv()
+
+                        # rgb query
+                        uv = self.mesh.vt * 2.0 - 1.0 # uvs to range [-1, 1]
+                        uv = torch.cat((uv, torch.zeros_like(uv[..., :1]), torch.ones_like(uv[..., :1])), dim=-1) # [N, 4]
+
+                        rast, _ = dr.rasterize(self.glctx, uv.unsqueeze(0), self.mesh.ft, (h, w)) # [1, h, w, 4]
+                        xyzs, _ = dr.interpolate(self.mesh.v.unsqueeze(0), rast, self.mesh.f) # [1, h, w, 3]
+
+                        # masked query 
+                        xyzs = xyzs.view(-1, 3)
+                        mask = (rast[..., 3] > 0).view(-1)
+                        
+                        albedo = torch.zeros(h * w, 3, device=self.device, dtype=torch.float32)
+
+                        if mask.any():
+                            xyzs = xyzs[mask] # [M, 3]
+
+                            # batched inference to avoid OOM
+                            all_albedo = []
+                            head = 0
+                            while head < xyzs.shape[0]:
+                                tail = min(head + 640000, xyzs.shape[0])
+                                all_albedo.append(self.model.rgb(xyzs[head:tail]))
+                                head += 640000
+
+                            albedo[mask] = torch.cat(all_albedo, dim=0)
+                        
+                        albedo = albedo.view(h, w, -1)
+                        mask = mask.view(h, w)
+
+                        albedo = albedo.cpu().numpy()
+                        mask = mask.cpu().numpy()
+
+                        # dilate texture 
+                        from sklearn.neighbors import NearestNeighbors
+                        from scipy.ndimage import binary_dilation, binary_erosion
+
+                        inpaint_region = binary_dilation(mask, iterations=32) # pad width
+                        inpaint_region[mask] = 0
+
+                        search_region = mask.copy()
+                        not_search_region = binary_erosion(search_region, iterations=3)
+                        search_region[not_search_region] = 0
+
+                        search_coords = np.stack(np.nonzero(search_region), axis=-1)
+                        inpaint_coords = np.stack(np.nonzero(inpaint_region), axis=-1)
+
+                        knn = NearestNeighbors(n_neighbors=1, algorithm='kd_tree').fit(search_coords)
+                        _, indices = knn.kneighbors(inpaint_coords)
+
+                        albedo[tuple(inpaint_coords.T)] = albedo[tuple(search_coords[indices[:, 0]].T)]
+
+                        self.mesh.albedo = torch.from_numpy(albedo).to(self.device)
+                        self.mesh.write(path)
+
+                        print(f'[INFO] saved mesh!')
 
                     dpg.add_button(label="save", tag="_button_save_mesh", callback=callback_save_mesh)
                     dpg.bind_item_theme("_button_save_mesh", theme_button)
-                    dpg.add_text('', tag="_log_save_mesh")
+                    dpg.add_input_text(label="", default_value=self.save_path, callback=callback_set_save_path)
             
             # drag stuff
             with dpg.collapsing_header(label="Drag", default_open=True):
@@ -641,7 +704,9 @@ class GUI:
                     dpg.add_button(label="Add", tag="_button_add_keypoint", callback=callback_add_keypoint)
 
                 # empty group as a handler
+                dpg.add_separator()
                 dpg.add_group(tag="_group_keypoints")
+                dpg.add_separator()
                 
                 # train stuff
                 with dpg.group(horizontal=True):
@@ -693,7 +758,6 @@ class GUI:
                     self.light_dir[user_data] = app_data
                     self.need_update = True
 
-                dpg.add_separator()
                 dpg.add_text("Plane Light Direction:")
 
                 with dpg.group(horizontal=True):
@@ -709,15 +773,6 @@ class GUI:
 
                 dpg.add_slider_float(label="ambient", min_value=0, max_value=1.0, format="%.5f", default_value=self.ambient_ratio, callback=callback_set_abm_ratio)
 
-            # debug info
-            if self.debug:
-                with dpg.collapsing_header(label="Debug"):
-                    # pose
-                    dpg.add_separator()
-                    dpg.add_text("Camera Pose:")
-                    dpg.add_text(str(self.cam.pose), tag="_log_pose")
-
-
         ### register camera handler
 
         def callback_camera_drag_rotate(sender, app_data):
@@ -732,9 +787,6 @@ class GUI:
             self.need_update = True
             self.need_update_overlay = True
 
-            if self.debug:
-                dpg.set_value("_log_pose", str(self.cam.pose))
-
 
         def callback_camera_wheel_scale(sender, app_data):
 
@@ -746,9 +798,6 @@ class GUI:
             self.cam.scale(delta)
             self.need_update = True
             self.need_update_overlay = True
-
-            if self.debug:
-                dpg.set_value("_log_pose", str(self.cam.pose))
 
 
         def callback_camera_drag_pan(sender, app_data):
@@ -763,8 +812,6 @@ class GUI:
             self.need_update = True
             self.need_update_overlay = True
 
-            if self.debug:
-                dpg.set_value("_log_pose", str(self.cam.pose))
 
         def callback_set_mouse_loc(sender, app_data):
 
@@ -773,6 +820,7 @@ class GUI:
 
             # just the pixel coordinate in image
             self.mouse_loc = np.array(app_data)
+
 
         def callback_keypoint_add(sender, app_data):
 
@@ -791,10 +839,9 @@ class GUI:
             vert = self.mesh.v[trig.long()] # [3, 3]
             uv = rast[:2]
             point_3d = (1 - uv[0] - uv[1]) * vert[0] + uv[0] * vert[1] + uv[1] * vert[2]
-            # point_3d = (1 - uv[0] - uv[1]) * vert[2] + uv[0] * vert[1] + uv[1] * vert[0]
             point_3d = point_3d.cpu().numpy()
 
-            # decide if it's close to a current
+            # decide if it's close to a current point, if so, just select it
             flag_mark_close = False
             if len(self.points_3d) > 0:
                 cur_points = np.array(self.points_3d)
@@ -805,7 +852,7 @@ class GUI:
                     self.point_idx = np.argmin(dist)
                     flag_mark_close = True
             
-            # add a new point
+            # else add a new point
             if not flag_mark_close:
                 self.points_3d.append(point_3d.tolist())
                 self.points_mask.append(True)
@@ -816,7 +863,6 @@ class GUI:
                 dpg.add_text(parent=f"_group_keypoint_{_id}", default_value=f"{', '.join([f'{x:.3f}' for x in self.points_3d[_id]])} +")
                 dpg.add_input_floatx(parent=f"_group_keypoint_{_id}", tag=f"_point_delta_{_id}", size=3, width=200, format="%.3f", on_enter=True, default_value=self.points_3d_delta[_id], callback=callback_update_keypoint_delta, user_data=_id)
                 dpg.add_button(parent=f"_group_keypoint_{_id}", label="Del", callback=callback_delete_keypoint, user_data=_id)
-                # update rendering
                 self.point_idx = _id
 
             self.need_update_overlay = True
@@ -854,7 +900,6 @@ class GUI:
             dpg.add_mouse_click_handler(button=dpg.mvMouseButton_Right, callback=callback_keypoint_add)
             dpg.add_mouse_drag_handler(button=dpg.mvMouseButton_Right, callback=callback_keypoint_drag)
 
-        
         dpg.create_viewport(title='Drag3D', width=self.W, height=self.H, resizable=False)
 
         ### global theme
@@ -869,7 +914,8 @@ class GUI:
 
         dpg.setup_dearpygui()
 
-        ### register font
+        ### register a larger font
+        # get it from: https://github.com/lxgw/LxgwWenKai/releases/download/v1.300/LXGWWenKai-Regular.ttf
         if os.path.exists('LXGWWenKai-Regular.ttf'):
             with dpg.font_registry():
                 with dpg.font('LXGWWenKai-Regular.ttf', 18) as default_font:
@@ -951,7 +997,7 @@ class GUI:
 @click.option('--tick', help='How often to print progress', metavar='KIMG', type=click.IntRange(min=1), default=1, show_default=True)  ##
 @click.option('--snap', help='How often to save snapshots', metavar='TICKS', type=click.IntRange(min=1), default=50, show_default=True)  ###
 @click.option('--seed', help='Random seed', metavar='INT', type=click.IntRange(min=0), default=0, show_default=True)
-@click.option('--fp32', help='Disable mixed-precision', metavar='BOOL', type=bool, default=True, show_default=True)  # Let's use fp32 all the case without clamping
+@click.option('--fp32', help='Disable mixed-precision', metavar='BOOL', type=bool, default=False, show_default=True)  # Let's use fp32 all the case without clamping
 @click.option('--nobench', help='Disable cuDNN benchmarking', metavar='BOOL', type=bool, default=False, show_default=True)
 @click.option('--workers', help='DataLoader worker processes', metavar='INT', type=click.IntRange(min=0), default=3, show_default=True)
 @click.option('-n', '--dry-run', help='Print training options and exit', is_flag=True)
@@ -962,10 +1008,10 @@ class GUI:
 @click.option('--fovy', help='GUI fovy in degree', metavar='FLOAT', type=click.FloatRange(min=0), default=50)
 def main(**kwargs):
     # Initialize config.
-    print('==> start')
     opts = dnnlib.EasyDict(kwargs)  # Command line arguments.
     c = dnnlib.EasyDict()  # Main config dict.
 
+    c.outdir = opts.outdir
     c.H = opts.height
     c.W = opts.width
     c.radius = opts.radius

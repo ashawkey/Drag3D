@@ -245,11 +245,13 @@ class Mesh():
         self.vn = vn
         self.fn = self.f
 
-    def auto_uv(self, cache_path):
+    def auto_uv(self, cache_path=None):
 
         # try to load cache
-        cache_path = cache_path.replace('.obj', '_uv.npz')
-        if os.path.exists(cache_path):
+        if cache_path is not None:
+            cache_path = cache_path.replace('.obj', '_uv.npz')
+
+        if cache_path is not None and os.path.exists(cache_path):
             data = np.load(cache_path)
             vt_np, ft_np = data['vt'], data['ft']
         else:
@@ -265,7 +267,8 @@ class Mesh():
             vmapping, ft_np, vt_np = atlas[0]  # [N], [M, 3], [N, 2]
 
             # save to cache
-            np.savez(cache_path, vt=vt_np, ft=ft_np)
+            if cache_path is not None:
+                np.savez(cache_path, vt=vt_np, ft=ft_np)
 
         vt = torch.from_numpy(vt_np.astype(np.float32)).to(self.device)
         ft = torch.from_numpy(ft_np.astype(np.int32)).to(self.device)

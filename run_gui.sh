@@ -1,2 +1,2 @@
-python gui.py --outdir=save_inference_results/shapenet_car --dmtet_scale 1.0 --one_3d_generator 1 --fp32 0 --resume_pretrain pretrained/shapenet_car.pt
-# python gui.py --outdir=save_inference_results/shapenet_table --dmtet_scale 1.0 --one_3d_generator 1 --fp32 0 --resume_pretrain pretrained/shapenet_table.pt
+python gui.py --outdir=save_inference_results/shapenet_car --resume_pretrain pretrained/shapenet_car.pt
+# python gui.py --outdir=save_inference_results/shapenet_table --resume_pretrain pretrained/shapenet_table.pt
