@@ -252,12 +252,16 @@ class GUI:
         assert self.mesh is not None, 'must generate a mesh before training'
         assert len(self.points_mask) > 0 and np.any(self.points_mask), 'must mark at least a drag point pair before training'
 
-        # TODO: optimize how many layers? need to be verified...
-        layers_to_opt = 20 # range in [1, 20], last two layers are fixed
-        self.ws_geo_param = torch.nn.Parameter(self.mesh.ws_geo[:, :layers_to_opt].clone()) # [1, l, 512]
-        self.ws_geo_nonparam = self.mesh.ws_geo[:, layers_to_opt:].clone() # [1, 22-l, 512]
+        # TODO: optimize how many layers is the best? need to be verified...
+        self.ws_geo_param = torch.nn.Parameter(self.mesh.ws_geo.clone()) # [1, l, 512]
+        self.optimizer = torch.optim.AdamW([self.ws_geo_param], lr=0.002)
 
-        self.optimizer = torch.optim.Adam([self.ws_geo_param], lr=0.002)
+        # layers_to_opt = 6 # range in [1, 20], last two layers are fixed
+        # self.ws_geo_param = torch.nn.Parameter(self.mesh.ws_geo[:, :layers_to_opt].clone()) # [1, l, 512]
+        # self.ws_geo_nonparam = self.mesh.ws_geo[:, layers_to_opt:20].clone() # [1, 20-l, 512]
+        # self.ws_geo_param2 = torch.nn.Parameter(self.mesh.ws_geo[:, 20:].clone()) # [1, 2, 512]
+        # self.optimizer = torch.optim.Adam([self.ws_geo_param, self.ws_geo_param2], lr=0.002)
+        
         self.step = 0
 
 
@@ -272,7 +276,8 @@ class GUI:
 
             ### 3D patch feature loss
             # loss --> triplanes (sdf_feature) --> ws_geo
-            ws_geo = torch.cat([self.ws_geo_param, self.ws_geo_nonparam], dim=1)
+            ws_geo = self.ws_geo_param
+            # ws_geo = torch.cat([self.ws_geo_param, self.ws_geo_nonparam, self.ws_geo_param2], dim=1)
             ws_tex = self.mesh.ws_tex
             sdf_feature, tex_feature = self.model.G.synthesis.generator.get_feature(
                 ws_tex[:, :self.model.num_ws_tex_triplane], # 7
@@ -316,7 +321,8 @@ class GUI:
                 B, N = patched_points.shape[:2]
 
                 # calculate updated sdf_feature
-                ws_geo = torch.cat([self.ws_geo_param, self.ws_geo_nonparam], dim=1)
+                ws_geo = self.ws_geo_param
+                # ws_geo = torch.cat([self.ws_geo_param, self.ws_geo_nonparam, self.ws_geo_param2], dim=1)
                 ws_tex = self.mesh.ws_tex
                 new_sdf_feature, new_tex_feature = self.model.G.synthesis.generator.get_feature(
                     ws_tex[:, :self.model.num_ws_tex_triplane], # 7
@@ -835,7 +841,7 @@ class GUI:
             vert = self.mesh.v[trig.long()] # [3, 3]
             uv = rast[:2]
             point_3d = (1 - uv[0] - uv[1]) * vert[0] + uv[0] * vert[1] + uv[1] * vert[2]
-            point_3d = point_3d.cpu().numpy()
+            point_3d = point_3d.detach().cpu().numpy()
 
             # decide if it's close to a current point, if so, just select it
             flag_mark_close = False
@@ -875,7 +881,7 @@ class GUI:
             dx = app_data[1]
             dy = app_data[2]
 
-            delta = 0.00002 * self.cam.rot.as_matrix()[:3, :3] @ np.array([dx, -dy, 0])
+            delta = 0.00004 * self.cam.rot.as_matrix()[:3, :3] @ np.array([dx, -dy, 0])
         
             self.points_3d_delta[self.point_idx][0] += delta[0]
             self.points_3d_delta[self.point_idx][1] += delta[1]

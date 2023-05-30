@@ -19,7 +19,7 @@ pip install -r requirements.txt
 wget https://github.com/lxgw/LxgwWenKai/releases/download/v1.300/LXGWWenKai-Regular.ttf
 ```
 
-Download pretrained GET3D checkpoints from [here](https://drive.google.com/drive/folders/1oJ-FmyVYjIwBZKDAQ4N1EEcE9dJjumdW?usp=sharing) and put them under `./pretrained_models`.
+Download pretrained GET3D checkpoints from [here](https://drive.google.com/drive/folders/1oJ-FmyVYjIwBZKDAQ4N1EEcE9dJjumdW?usp=sharing) and put them under `./pretrained_model`.
 
 
 ### Tested Environment
@@ -30,7 +30,7 @@ The required GPU memory is about 4 GB.
 ## Usage
 ```bash
 # run gui
-python gui.py --outdir trial_car --resume_pretrain pretrained_models/shapenet_car.pt
+python gui.py --outdir trial_car --resume_pretrain pretrained_model/shapenet_car.pt
 ```
 
 You need to click `get` to generate a 3D model first.
