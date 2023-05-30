@@ -343,9 +343,9 @@ class GUI:
 
                 # need to add back those deleted points... this should be improved...
                 new_source_points_with_deleted = np.array(self.points_3d)
-                new_source_points_with_deleted[np.array(self.points_mask)] = new_source_points.cpu().numpy()
+                new_source_points_with_deleted[np.array(self.points_mask)] = new_source_points.detach().cpu().numpy()
                 new_source_points_delta_with_deleted = np.array(self.points_3d_delta)
-                new_source_points_delta_with_deleted[np.array(self.points_mask)] = new_points_delta.cpu().numpy()
+                new_source_points_delta_with_deleted[np.array(self.points_mask)] = new_points_delta.detach().cpu().numpy()
 
                 self.points_3d = new_source_points_with_deleted.tolist()
                 self.points_3d_delta = new_source_points_delta_with_deleted.tolist()
@@ -635,8 +635,8 @@ class GUI:
                         albedo = albedo.view(h, w, -1)
                         mask = mask.view(h, w)
 
-                        albedo = albedo.cpu().numpy()
-                        mask = mask.cpu().numpy()
+                        albedo = albedo.detach().cpu().numpy()
+                        mask = mask.detach().cpu().numpy()
 
                         # dilate texture 
                         from sklearn.neighbors import NearestNeighbors

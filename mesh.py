@@ -257,8 +257,8 @@ class Mesh():
         else:
 
             import xatlas
-            v_np = self.v.cpu().numpy()
-            f_np = self.f.int().cpu().numpy()
+            v_np = self.v.detach().cpu().numpy()
+            f_np = self.f.detach().int().cpu().numpy()
             atlas = xatlas.Atlas()
             atlas.add_mesh(v_np, f_np)
             chart_options = xatlas.ChartOptions()
@@ -290,12 +290,12 @@ class Mesh():
         mtl_path = path.replace('.obj', '.mtl')
         albedo_path = path.replace('.obj', '_albedo.png')
 
-        v_np = self.v.cpu().numpy()
-        vt_np = self.vt.cpu().numpy() if self.vt is not None else None
-        vn_np = self.vn.cpu().numpy() if self.vn is not None else None
-        f_np = self.f.cpu().numpy()
-        ft_np = self.ft.cpu().numpy() if self.ft is not None else None
-        fn_np = self.fn.cpu().numpy() if self.fn is not None else None
+        v_np = self.v.detach().cpu().numpy()
+        vt_np = self.vt.detach().cpu().numpy() if self.vt is not None else None
+        vn_np = self.vn.detach().cpu().numpy() if self.vn is not None else None
+        f_np = self.f.detach().cpu().numpy()
+        ft_np = self.ft.detach().cpu().numpy() if self.ft is not None else None
+        fn_np = self.fn.detach().cpu().numpy() if self.fn is not None else None
 
         with open(path, "w") as fp:
             fp.write(f'mtllib {os.path.basename(mtl_path)} \n')
@@ -327,6 +327,6 @@ class Mesh():
             fp.write(f'Ns 0 \n')
             fp.write(f'map_Kd {os.path.basename(albedo_path)} \n')
 
-        albedo = self.albedo.cpu().numpy()
+        albedo = self.albedo.detach().cpu().numpy()
         albedo = (albedo * 255).astype(np.uint8)
         cv2.imwrite(albedo_path, cv2.cvtColor(albedo, cv2.COLOR_RGB2BGR))

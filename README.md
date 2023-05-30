@@ -1,8 +1,8 @@
 # Drag3D: DragGAN meets GET3D
 
-This project extends the idea of DragGAN into 3D space to enable interactive generation and drag editing of textured meshes.
+This project extends the idea of [DragGAN](https://github.com/XingangPan/DragGAN) into the [GET3D](https://github.com/nv-tlabs/GET3D) to enable interactive generation and drag editing of textured meshes.
 
-We implement a GUI to demonstrate real-time 3D point drag editing of 3D textured meshes.
+We also implement a GUI to demonstrate real-time 3D point drag editing of 3D textured meshes:
 
 **TODO: demo video**
 
@@ -52,7 +52,7 @@ Finally, click `save` to export textured mesh.
 
 ## Acknowledgement
 
-* DragGAN:
+* [DragGAN](https://github.com/XingangPan/DragGAN):
   ```latex
   @inproceedings{pan2023draggan,
     title={Drag Your GAN: Interactive Point-based Manipulation on the Generative Image Manifold}, 
@@ -62,7 +62,7 @@ Finally, click `save` to export textured mesh.
   }
   ```
 
-* GET3D:
+* [GET3D](https://github.com/nv-tlabs/GET3D):
   ```latex
   @inproceedings{gao2022get3d,
     title={GET3D: A Generative Model of High Quality 3D Textured Shapes Learned from Images},
