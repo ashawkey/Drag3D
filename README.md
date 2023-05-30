@@ -4,7 +4,7 @@ This project extends the idea of [DragGAN](https://github.com/XingangPan/DragGAN
 
 We also implement a GUI to demonstrate real-time 3D point drag editing of 3D textured meshes:
 
-**TODO: demo video**
+https://github.com/ashawkey/Drag3D/assets/25863658/d7ea4e07-d6d1-44e3-b7b6-3c2fd3dc1a0f
 
 ## Install
 ```bash
