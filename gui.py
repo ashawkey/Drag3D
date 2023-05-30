@@ -896,7 +896,7 @@ class GUI:
             dpg.add_mouse_click_handler(button=dpg.mvMouseButton_Right, callback=callback_keypoint_add)
             dpg.add_mouse_drag_handler(button=dpg.mvMouseButton_Right, callback=callback_keypoint_drag)
 
-        dpg.create_viewport(title='Drag3D', width=self.W, height=self.H, resizable=False)
+        dpg.create_viewport(title='Drag3D', width=self.W, height=self.H + (45 if os.name == 'nt' else 0), resizable=False)
 
         ### global theme
         with dpg.theme() as theme_no_padding:

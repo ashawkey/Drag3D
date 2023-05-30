@@ -3,5 +3,5 @@ __pycache__
 save_inference_results
 *.pt
 tmp_*
-
+trial*
 *.ttf

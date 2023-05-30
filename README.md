@@ -14,13 +14,18 @@ cd Drag3D
 
 # dependency
 pip install -r requirements.txt
+
+# (optional) get a better font to display
+wget https://github.com/lxgw/LxgwWenKai/releases/download/v1.300/LXGWWenKai-Regular.ttf
 ```
 
 Download pretrained GET3D checkpoints from [here](https://drive.google.com/drive/folders/1oJ-FmyVYjIwBZKDAQ4N1EEcE9dJjumdW?usp=sharing) and put them under `./pretrained_models`.
 
 
 ### Tested Environment
-* Ubuntu 20 + CUDA 11.6 + torch 1.12
+The required GPU memory is about 4 GB.
+* Ubuntu 20 + V100 + CUDA 11.6 + torch 1.12.0
+* Windows 10 + 3070 + CUDA 12.1 + torch 2.1.0
 
 ## Usage
 ```bash
