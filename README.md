@@ -16,7 +16,7 @@ cd Drag3D
 pip install -r requirements.txt
 ```
 
-Download pretrained GET3D checkpoints from [here](https://drive.google.com/drive/folders/1oJ-FmyVYjIwBZKDAQ4N1EEcE9dJjumdW?usp=sharing) and put them under `./pretrained`.
+Download pretrained GET3D checkpoints from [here](https://drive.google.com/drive/folders/1oJ-FmyVYjIwBZKDAQ4N1EEcE9dJjumdW?usp=sharing) and put them under `./pretrained_models`.
 
 
 ### Tested Environment
@@ -25,7 +25,7 @@ Download pretrained GET3D checkpoints from [here](https://drive.google.com/drive
 ## Usage
 ```bash
 # run gui
-python gui.py --outdir trial_car --resume_pretrain pretrained/shapenet_car.pt
+python gui.py --outdir trial_car --resume_pretrain pretrained_models/shapenet_car.pt
 ```
 
 You need to click `get` to generate a 3D model first.

@@ -1,2 +1,2 @@
-python gui.py --outdir=save_inference_results/shapenet_car --resume_pretrain pretrained/shapenet_car.pt
-# python gui.py --outdir=save_inference_results/shapenet_table --resume_pretrain pretrained/shapenet_table.pt
+python gui.py --outdir=save_inference_results/shapenet_car --resume_pretrain pretrained_models/shapenet_car.pt
+# python gui.py --outdir=save_inference_results/shapenet_table --resume_pretrain pretrained_models/shapenet_table.pt
