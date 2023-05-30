@@ -101,19 +101,15 @@ class GET3DWrapper:
 
         common_kwargs = dict(c_dim=0, img_resolution=1024, img_channels=3)
         G_kwargs['device'] = device
-        self.G = dnnlib.util.construct_class_by_name(**G_kwargs, **common_kwargs).train().requires_grad_(False).to(device)  # subclass of torch.nn.Module
+        self.G = dnnlib.util.construct_class_by_name(**G_kwargs, **common_kwargs).eval().requires_grad_(False).to(device)  # subclass of torch.nn.Module
         
         print('[INFO] resume GET3D from pretrained path %s' % (resume_pretrain))
-        model_state_dict = torch.load(resume_pretrain, map_location=device)
+        model_state_dict = torch.load(resume_pretrain, map_location='cpu')
 
         # we only need the ema model
         self.G.load_state_dict(model_state_dict['G_ema'], strict=True)
-
-        # freeze it!
-        self.G.eval()
-        for p in self.G.parameters():
-            p.requires_grad_(False)
-        
+        del model_state_dict
+       
         # some reference for convenience
         self.num_ws_geo_triplane = self.G.synthesis.generator.tri_plane_synthesis.num_ws_geo
         self.num_ws_tex_triplane = self.G.synthesis.generator.tri_plane_synthesis.num_ws_tex
@@ -997,7 +993,7 @@ class GUI:
 @click.option('--tick', help='How often to print progress', metavar='KIMG', type=click.IntRange(min=1), default=1, show_default=True)  ##
 @click.option('--snap', help='How often to save snapshots', metavar='TICKS', type=click.IntRange(min=1), default=50, show_default=True)  ###
 @click.option('--seed', help='Random seed', metavar='INT', type=click.IntRange(min=0), default=0, show_default=True)
-@click.option('--fp32', help='Disable mixed-precision', metavar='BOOL', type=bool, default=False, show_default=True)  # Let's use fp32 all the case without clamping
+@click.option('--fp32', help='Disable mixed-precision', metavar='BOOL', type=bool, default=True, show_default=True)  # Let's use fp32 all the case without clamping
 @click.option('--nobench', help='Disable cuDNN benchmarking', metavar='BOOL', type=bool, default=False, show_default=True)
 @click.option('--workers', help='DataLoader worker processes', metavar='INT', type=click.IntRange(min=0), default=3, show_default=True)
 @click.option('-n', '--dry-run', help='Print training options and exit', is_flag=True)
@@ -1012,6 +1008,7 @@ def main(**kwargs):
     c = dnnlib.EasyDict()  # Main config dict.
 
     c.outdir = opts.outdir
+    c.fp32 = opts.fp32
     c.H = opts.height
     c.W = opts.width
     c.radius = opts.radius
