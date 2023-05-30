@@ -2,3 +2,6 @@
 __pycache__
 save_inference_results
 pretrained
+tmp_*
+
+*.ttf
