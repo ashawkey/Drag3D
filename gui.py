@@ -384,7 +384,7 @@ class GUI:
         self.need_update = True
         self.need_update_overlay = True
 
-        dpg.set_value("_log_train_time", f'{t:.4f}ms ({int(1000/t)} FPS)')
+        dpg.set_value("_log_train_time", f'{t:.4f}ms')
         dpg.set_value("_log_train_log", f'step = {self.step: 5d} (+{self.train_steps: 2d}) loss = {loss.item():.4f}')
 
         # dynamic train steps (no need for now)
