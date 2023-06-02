@@ -232,7 +232,7 @@ class GUI:
         self.enable_bbox_loss = False
         # TODO: a suitable batch size and weight
         self.bbox_batch = 4096 
-        self.bbox_loss_weight = 10
+        self.bbox_loss_weight = 1 # 20 in paper...
 
         # training stuff
         self.training = False
