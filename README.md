@@ -1,8 +1,8 @@
 # Drag3D: DragGAN meets GET3D
 
-This project extends the idea of [DragGAN](https://github.com/XingangPan/DragGAN) into the [GET3D](https://github.com/nv-tlabs/GET3D) to enable interactive generation and drag editing of textured meshes.
+This project extends the idea of [DragGAN](https://github.com/XingangPan/DragGAN) into the [GET3D](https://github.com/nv-tlabs/GET3D) to enable **interactive generation and drag editing of textured meshes**.
 
-We also implement a GUI to demonstrate real-time 3D point drag editing of 3D textured meshes:
+A GUI is implemented for demonstration:
 
 https://github.com/ashawkey/Drag3D/assets/25863658/d7ea4e07-d6d1-44e3-b7b6-3c2fd3dc1a0f
 
@@ -23,31 +23,45 @@ Download pretrained GET3D checkpoints from [here](https://drive.google.com/drive
 
 
 ### Tested Environment
-The required GPU memory is about 4 GB.
 * Ubuntu 20 + V100 + CUDA 11.6 + torch 1.12.0
 * Windows 10 + 3070 + CUDA 12.1 + torch 2.1.0
 
+You need to have an OpenGL direct rendering enabled display to use the GUI.
+
+The required GPU memory is about 4 GB.
+
+**NOTE**: For Unix-based OS, [we could only use the CUDA context](https://github.com/NVlabs/nvdiffrast/issues/45#issuecomment-1193951836) of `nvdiffrast` in GUI, which seems to show some rendering artifacts when the mesh is too far from camera (triangles too small). Windows is recommended.
+
 ## Usage
+
+### basics
 ```bash
 # run gui
 python gui.py --outdir trial_car --resume_pretrain pretrained_model/shapenet_car.pt
 ```
 
-You need to click `get` to generate a 3D model first.
+You need to click `get` to generate a 3D model first, and use `geo` or `tex` to resample geometry or texture.
 
 Then, operate the GUI by:
-* Left drag: rotate camera.
-* Middle drag: pan camera.
-* Scroll: scale camera.
-* Right click: add / select source point.
-* Right drag: drag target point.
+* **Left drag**: rotate camera.
+* **Middle drag**: pan camera.
+* **Scroll**: scale camera.
+* **Right click**: add / select source point.
+* **Right drag**: drag target point.
 
 After adding at least one point pair, click `train` to start optimization.
 
-You can repeat these steps until get satisfying shapes.
+You can repeat these steps until getting satisfying shapes.
 
-Finally, click `save` to export textured mesh.
+Finally, click `save` to export the current textured mesh.
 
+
+### bounding box mask loss (experimental)
+In GUI, you could check `bbox loss` and adjust the bounding box to constrain the optimization, like the 2D mask loss.
+
+The part **outside the bounding box** will be encouraged to remain unchanged. 
+
+The learning rate and loss weight can be adjusted in GUI to achieve a balance.
 
 
 ## Acknowledgement

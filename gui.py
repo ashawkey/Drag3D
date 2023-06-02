@@ -29,6 +29,9 @@ filtered_lrelu._init()
 conv2d_gradfix.enabled = True  # Improves training speed.
 grid_sample_gradfix.enabled = True  # Avoids errors with the augmentation pipe.
 
+CUBE_V = np.array([[0,0,0], [0,0,1], [0,1,0], [0,1,1], [1,0,0], [1,0,1], [1,1,0], [1,1,1]])
+CUBE_E = np.array([[0, 1], [0, 2], [0, 4], [4, 5], [4, 6], [5, 1], [5, 7], [1, 3], [2, 3], [3, 7], [6, 7], [2, 6]])
+
 def safe_normalize(x, eps=1e-20):
     return x / torch.sqrt(torch.clamp(torch.sum(x * x, -1, keepdim=True), min=eps))
 
@@ -173,7 +176,7 @@ class GET3DWrapper:
         self.mesh.auto_normal()
 
         # bind features to mesh for convenience
-        # self.mesh.sdf_feature = sdf_feature
+        self.mesh.sdf_feature = sdf_feature
         self.mesh.ws_geo = ws_geo
         self.mesh.ws_geo_last = ws_geo_last
         self.mesh.tex_feature = tex_feature
@@ -225,11 +228,18 @@ class GUI:
         self.points_mask = []
         self.points_3d_delta = []
 
+        self.bbox_points = [[-1, -1, -1], [1, 1, 1]]
+        self.enable_bbox_loss = False
+        # TODO: a suitable batch size and weight
+        self.bbox_batch = 4096 
+        self.bbox_loss_weight = 10
+
         # training stuff
         self.training = False
         self.optimizer = None
         self.ws_geo_param = None
         self.ws_geo_nonparam = None
+        self.lr = 0.002
         self.r1 = 3 # 3
         self.r2 = 9 # 12
 
@@ -253,17 +263,19 @@ class GUI:
         assert len(self.points_mask) > 0 and np.any(self.points_mask), 'must mark at least a drag point pair before training'
 
         # TODO: optimize how many layers is the best? need to be verified...
-        self.ws_geo_param = torch.nn.Parameter(self.mesh.ws_geo.clone()) # [1, l, 512]
-        self.optimizer = torch.optim.AdamW([self.ws_geo_param], lr=0.002)
+        # self.ws_geo_param = torch.nn.Parameter(self.mesh.ws_geo.clone()) # [1, l, 512]
+        # self.optimizer = torch.optim.AdamW([self.ws_geo_param], lr=self.lr)
 
-        # layers_to_opt = 6 # range in [1, 20], last two layers are fixed
-        # self.ws_geo_param = torch.nn.Parameter(self.mesh.ws_geo[:, :layers_to_opt].clone()) # [1, l, 512]
-        # self.ws_geo_nonparam = self.mesh.ws_geo[:, layers_to_opt:20].clone() # [1, 20-l, 512]
-        # self.ws_geo_param2 = torch.nn.Parameter(self.mesh.ws_geo[:, 20:].clone()) # [1, 2, 512]
-        # self.optimizer = torch.optim.Adam([self.ws_geo_param, self.ws_geo_param2], lr=0.002)
+        l_start = 4 # skip optimizing early feature layers as suggested in paper
+        self.ws_geo_nonparam = self.mesh.ws_geo[:, :l_start].clone() # [1, l, 512]
+        self.ws_geo_param = torch.nn.Parameter(self.mesh.ws_geo[:, l_start:].clone()) # [1, 22-l, 512]
+        self.optimizer = torch.optim.Adam([self.ws_geo_param], lr=self.lr)
         
         self.step = 0
 
+        # keep a copy of the original sdf feature for bbox loss
+        if self.enable_bbox_loss:
+            self.original_sdf_feature = self.mesh.sdf_feature.detach().clone()
 
     def train_step(self):
 
@@ -276,8 +288,8 @@ class GUI:
 
             ### 3D patch feature loss
             # loss --> triplanes (sdf_feature) --> ws_geo
-            ws_geo = self.ws_geo_param
-            # ws_geo = torch.cat([self.ws_geo_param, self.ws_geo_nonparam, self.ws_geo_param2], dim=1)
+            # ws_geo = self.ws_geo_param
+            ws_geo = torch.cat([self.ws_geo_nonparam, self.ws_geo_param], dim=1)
             ws_tex = self.mesh.ws_tex
             sdf_feature, tex_feature = self.model.G.synthesis.generator.get_feature(
                 ws_tex[:, :self.model.num_ws_tex_triplane], # 7
@@ -307,6 +319,23 @@ class GUI:
 
             loss = F.l1_loss(shifted_feat, patched_feat.detach())
 
+            # randomized bounding box mask loss
+            if self.enable_bbox_loss:
+                # sample random points in side mesh's aabb
+                vmin, vmax = self.mesh.aabb()
+                rand_points = torch.rand([self.bbox_batch, 3], dtype=torch.float32, device=self.device) * (vmax - vmin) + vmin # [B, 3]
+                # remove those falling into our bbox
+                in_bbox_mask = (rand_points > torch.tensor(self.bbox_points[0], dtype=torch.float32, device=rand_points.device)).all(dim=1) & \
+                               (rand_points < torch.tensor(self.bbox_points[1], dtype=torch.float32, device=rand_points.device)).all(dim=1) # [B]
+                rand_points = rand_points[~in_bbox_mask] 
+                # keep out-of-bbox points feature fixed
+                if rand_points.shape[0] > 0:
+                    with torch.no_grad():
+                        original_feat = self.model.G.synthesis.generator.get_sdf_def_prediction(self.original_sdf_feature, rand_points.reshape(1, -1, 3), return_feats=True)
+                    current_feat = self.model.G.synthesis.generator.get_sdf_def_prediction(sdf_feature, rand_points.reshape(1, -1, 3), return_feats=True)
+                    bbox_loss = F.l1_loss(current_feat, original_feat)
+                    loss = loss + self.bbox_loss_weight * bbox_loss
+
             # optimize step
             loss.backward()
             self.optimizer.step()
@@ -321,8 +350,8 @@ class GUI:
                 B, N = patched_points.shape[:2]
 
                 # calculate updated sdf_feature
-                ws_geo = self.ws_geo_param
-                # ws_geo = torch.cat([self.ws_geo_param, self.ws_geo_nonparam, self.ws_geo_param2], dim=1)
+                # ws_geo = self.ws_geo_param
+                ws_geo = torch.cat([self.ws_geo_nonparam, self.ws_geo_param], dim=1)
                 ws_tex = self.mesh.ws_tex
                 new_sdf_feature, new_tex_feature = self.model.G.synthesis.generator.get_feature(
                     ws_tex[:, :self.model.num_ws_tex_triplane], # 7
@@ -363,7 +392,7 @@ class GUI:
             ws_geo_last = ws_geo[:, self.model.num_ws_geo_triplane:].contiguous() # [1, 2, 512]
             
             # bind features to mesh for convenience
-            # mesh.sdf_feature = new_sdf_feature
+            mesh.sdf_feature = new_sdf_feature
             mesh.ws_geo = ws_geo
             mesh.ws_geo_last = ws_geo_last
             mesh.tex_feature = new_tex_feature
@@ -423,9 +452,8 @@ class GUI:
                     depth = rast[0, :, :, [2]]  # [H, W, 1]
                     buffer_image = depth.detach().cpu().numpy().repeat(3, -1) # [H, W, 3]
                 else:
-                    # texc, _ = dr.interpolate(self.mesh.vt.unsqueeze(0).contiguous(), rast, self.mesh.ft)
-                    # albedo = dr.texture(self.mesh.albedo.unsqueeze(0), texc, filter_mode='linear') # [1, H, W, 3]
                     pos, _ = dr.interpolate(self.mesh.v.unsqueeze(0), rast, self.mesh.f) # [1, H, W, 3]
+
                     pos = pos.view(-1, 3)
                     mask = (rast[..., 3] > 0).view(-1)
                     albedo = torch.zeros_like(pos, dtype=torch.float32)
@@ -434,9 +462,9 @@ class GUI:
                     albedo = albedo.view(1, self.H, self.W, 3)
                     alpha = (rast[..., [3]] > 0).float()
 
-                    # albedo = torch.where(rast[..., 3:] > 0, albedo, torch.tensor(0).to(albedo.device)) # remove background
                     albedo = dr.antialias(albedo, rast, v_clip, self.mesh.f).clamp(0, 1) # [1, H, W, 3]
                     alpha = dr.antialias(alpha, rast, v_clip, self.mesh.f).clamp(0, 1) # [1, H, W, 1]
+
                     if self.mode == 'albedo':
                         buffer_image = albedo[0]
                     else:
@@ -466,14 +494,14 @@ class GUI:
         if self.need_update_overlay:
             buffer_overlay = np.zeros_like(self.buffer_overlay)
 
-            mask = np.array(self.points_mask).astype(bool)
-            if mask.any():
-                
-                # do mvp transform for keypoints
-                mv = self.cam.view # [4, 4]
-                proj = self.cam.perspective # [4, 4]
-                mvp = proj @ mv
+            mv = self.cam.view # [4, 4]
+            proj = self.cam.perspective # [4, 4]
+            mvp = proj @ mv
 
+            mask = np.array(self.points_mask).astype(bool)
+
+            if mask.any():
+                # do mvp transform for keypoints
                 source_points = np.array(self.points_3d)[mask]
                 target_points = source_points + np.array(self.points_3d_delta)[mask]
                 points_indices = np.arange(len(self.points_3d))[mask]
@@ -483,12 +511,8 @@ class GUI:
                 source_points_clip[:, :3] /= source_points_clip[:, 3:] # perspective division
                 target_points_clip[:, :3] /= target_points_clip[:, 3:] # perspective division
 
-                source_points_2d = ((source_points_clip[:, :2] + 1) / 2 * np.array([self.H, self.W])).round().astype(np.int32)
-                target_points_2d = ((target_points_clip[:, :2] + 1) / 2 * np.array([self.H, self.W])).round().astype(np.int32)
-
-                # depth test ?
-                # source_points_depth = source_points_clip[:, 2]
-                # actual_depth = self.buffer_rast[0, :, :, 2]
+                source_points_2d = (((source_points_clip[:, :2] + 1) / 2) * np.array([self.H, self.W])).round().astype(np.int32)
+                target_points_2d = (((target_points_clip[:, :2] + 1) / 2) * np.array([self.H, self.W])).round().astype(np.int32)
 
                 radius = int((self.H + self.W) / 2 * 0.005)
                 for i in range(len(source_points_clip)):
@@ -499,9 +523,22 @@ class GUI:
                         # draw target point
                         if target_points_2d[i, 0] >= radius and target_points_2d[i, 0] < self.W - radius and target_points_2d[i, 1] >= radius and target_points_2d[i, 1] < self.H - radius:
                             buffer_overlay[target_points_2d[i, 1]-radius:target_points_2d[i, 1]+radius, target_points_2d[i, 0]-radius:target_points_2d[i, 0]+radius] += np.array([0,0,1]) if not point_idx == self.point_idx else np.array([0.5,0.5,1])
-                            # draw line
-                            rr, cc, val = line_aa(source_points_2d[i, 1], source_points_2d[i, 0], target_points_2d[i, 1], target_points_2d[i, 0])
-                            buffer_overlay[rr, cc] += val[..., None] * np.array([0,1,0]) if not point_idx == self.point_idx else np.array([0.5,1,0])
+                        # draw line
+                        rr, cc, val = line_aa(source_points_2d[i, 1], source_points_2d[i, 0], target_points_2d[i, 1], target_points_2d[i, 0])
+                        in_canvas_mask = (rr >= 0) & (rr < self.H) & (cc >= 0) & (cc < self.W)
+                        buffer_overlay[rr[in_canvas_mask], cc[in_canvas_mask]] += val[in_canvas_mask, None] * np.array([0,1,0]) if not point_idx == self.point_idx else np.array([0.5,1,0])
+            
+            # draw bbox
+            if self.enable_bbox_loss:
+                bbox_points = np.take_along_axis(np.array(self.bbox_points), CUBE_V, axis=0) # [8, 3]
+                bbox_points_clip = np.matmul(np.pad(bbox_points, ((0, 0), (0, 1)), constant_values=1.0), mvp.T)  # [N, 4]
+                bbox_points_clip[:, :3] /= bbox_points_clip[:, 3:] # perspective division
+                bbox_points_2d = (((bbox_points_clip[:, :2] + 1) / 2) * np.array([self.H, self.W])).round().astype(np.int32)
+                
+                for e in CUBE_E:
+                    rr, cc, val = line_aa(bbox_points_2d[e[0], 1], bbox_points_2d[e[0], 0], bbox_points_2d[e[1], 1], bbox_points_2d[e[1], 0])
+                    in_canvas_mask = (rr >= 0) & (rr < self.H) & (cc >= 0) & (cc < self.W)
+                    buffer_overlay[rr[in_canvas_mask], cc[in_canvas_mask]] += val[in_canvas_mask, None] * np.array([0.5,0.5,0.5]) # grey
 
             self.buffer_overlay = buffer_overlay
             self.need_update_overlay = False
@@ -512,9 +549,9 @@ class GUI:
         dpg.set_value("_log_infer_time", f'{t:.4f}ms ({int(1000/t)} FPS)')
 
         # mix image and overlay
-        # buffer = np.clip(self.buffer_image + self.buffer_overlay, 0, 1)
+        # buffer = np.clip(self.buffer_image + self.buffer_overlay, 0, 1) # mix mode, sometimes unclear
         overlay_mask = self.buffer_overlay.sum(axis=-1, keepdims=True) == 0
-        buffer = self.buffer_image * overlay_mask + self.buffer_overlay
+        buffer = self.buffer_image * overlay_mask + self.buffer_overlay # replace mode
 
         dpg.set_value("_texture", buffer)
 
@@ -537,7 +574,7 @@ class GUI:
         dpg.set_primary_window("_primary_window", True)
 
         # control window
-        with dpg.window(label="Control", tag="_control_window", width=600, height=300):
+        with dpg.window(label="Control", tag="_control_window", width=600, height=350):
 
             # button theme
             with dpg.theme() as theme_button:
@@ -693,7 +730,8 @@ class GUI:
                     dpg.add_group(parent="_group_keypoints", tag=f"_group_keypoint_{_id}", horizontal=True)
                     dpg.add_text(parent=f"_group_keypoint_{_id}", default_value=f"{', '.join([f'{x:.3f}' for x in self.points_3d[_id]])} +")
                     dpg.add_input_floatx(parent=f"_group_keypoint_{_id}", tag=f"_point_delta_{_id}", size=3, width=200, format="%.3f", on_enter=True, default_value=self.points_3d_delta[_id], callback=callback_update_keypoint_delta, user_data=_id)
-                    dpg.add_button(parent=f"_group_keypoint_{_id}", label="Del", callback=callback_delete_keypoint, user_data=_id)
+                    dpg.add_button(parent=f"_group_keypoint_{_id}", tag=f"_button_del_keypoint_{_id}", label="del", callback=callback_delete_keypoint, user_data=_id)
+                    dpg.bind_item_theme(f"_button_del_keypoint_{_id}", theme_button)
                     # update rendering
                     self.need_update_overlay = True
 
@@ -703,13 +741,30 @@ class GUI:
                 with dpg.group(horizontal=True):
                     dpg.add_text("Keypoint: ")
                     dpg.add_input_floatx(default_value=self.point_3d, size=3, width=200, format="%.3f", on_enter=False, callback=callback_update_new_keypoint)
-                    dpg.add_button(label="Add", tag="_button_add_keypoint", callback=callback_add_keypoint)
+                    dpg.add_button(label="add", tag="_button_add_keypoint", callback=callback_add_keypoint)
+                    dpg.bind_item_theme("_button_add_keypoint", theme_button)
 
                 # empty group as a handler
                 dpg.add_separator()
                 dpg.add_group(tag="_group_keypoints")
                 dpg.add_separator()
+
+                # mask area
+                def callback_update_bbox_point(sender, app_data, user_data):
+                    self.bbox_points[user_data[0]][user_data[1]] = app_data
+                    # make sure left-bottom is smaller than right-top
+                    if user_data[0] == 0:
+                        self.bbox_points[1][user_data[1]] = max(app_data, self.bbox_points[1][user_data[1]])
+                        dpg.configure_item(f"_bbox_point_1_{user_data[1]}", default_value=self.bbox_points[1][user_data[1]])
+                    else:
+                        self.bbox_points[0][user_data[1]] = min(app_data, self.bbox_points[0][user_data[1]])
+                        dpg.configure_item(f"_bbox_point_0_{user_data[1]}", default_value=self.bbox_points[0][user_data[1]])
+                    self.need_update_overlay = True
                 
+                def callback_toggle_mask_loss(sender, app_data):
+                    self.enable_bbox_loss = not self.enable_bbox_loss
+                    self.need_update_overlay = True
+
                 # train stuff
                 with dpg.group(horizontal=True):
                     dpg.add_text("Train: ")
@@ -724,11 +779,50 @@ class GUI:
                             dpg.configure_item("_button_train", label="stop")
 
                     dpg.add_button(label="start", tag="_button_train", callback=callback_train)
-                    dpg.bind_item_theme("_button_train", theme_button)                   
+                    dpg.bind_item_theme("_button_train", theme_button)
+
+                    def callback_set_lr(sender, app_data):
+                        self.lr = app_data
+                    
+                    dpg.add_text("lr: ")
+                    dpg.add_input_float(default_value=self.lr, width=150, format="%.6f", callback=callback_set_lr)
 
                     dpg.add_text("", tag="_log_train_time")
                     dpg.add_text("", tag="_log_train_log")
 
+                with dpg.group(horizontal=True):
+                    dpg.add_checkbox(label="bbox loss (modify in-bbox region)", default_value=self.enable_bbox_loss, callback=callback_toggle_mask_loss)
+
+                    def callback_reset_bbox(sender, app_data):
+                        if self.mesh is None:
+                            return
+                        vmin, vmax = self.mesh.aabb()
+                        self.bbox_points = [vmin.detach().cpu().numpy().tolist(), vmax.detach().cpu().numpy().tolist()]
+                        for i in range(2):
+                            for j in range(3):
+                                dpg.configure_item(f"_bbox_point_{i}_{j}", default_value=self.bbox_points[i][j])
+                        self.need_update_overlay = True
+
+                    dpg.add_button(label="reset bbox", tag="_button_reset_bbox", callback=callback_reset_bbox)
+                    dpg.bind_item_theme("_button_reset_bbox", theme_button)
+
+                    def callback_set_bbox_loss_weight(sender, app_data):
+                        self.bbox_loss_weight = app_data
+                    
+                    dpg.add_text("weight: ")
+                    dpg.add_input_float(default_value=self.bbox_loss_weight, width=200, format="%.3f", callback=callback_set_bbox_loss_weight)
+
+                with dpg.group(horizontal=True):
+                    dpg.add_text("left-bottom: ")
+                    dpg.add_slider_float(tag='_bbox_point_0_0', width=120, min_value=-1, max_value=1, format="%.3f", default_value=self.bbox_points[0][0], callback=callback_update_bbox_point, user_data=[0, 0])
+                    dpg.add_slider_float(tag='_bbox_point_0_1', width=120, min_value=-1, max_value=1, format="%.3f", default_value=self.bbox_points[0][1], callback=callback_update_bbox_point, user_data=[0, 1])
+                    dpg.add_slider_float(tag='_bbox_point_0_2', width=120, min_value=-1, max_value=1, format="%.3f", default_value=self.bbox_points[0][2], callback=callback_update_bbox_point, user_data=[0, 2])
+                with dpg.group(horizontal=True):
+                    dpg.add_text("right-top:   ")
+                    dpg.add_slider_float(tag='_bbox_point_1_0', width=120, min_value=-1, max_value=1, format="%.3f", default_value=self.bbox_points[1][0], callback=callback_update_bbox_point, user_data=[1, 0])
+                    dpg.add_slider_float(tag='_bbox_point_1_1', width=120, min_value=-1, max_value=1, format="%.3f", default_value=self.bbox_points[1][1], callback=callback_update_bbox_point, user_data=[1, 1])
+                    dpg.add_slider_float(tag='_bbox_point_1_2', width=120, min_value=-1, max_value=1, format="%.3f", default_value=self.bbox_points[1][2], callback=callback_update_bbox_point, user_data=[1, 2])
+            
             # rendering options
             with dpg.collapsing_header(label="Rendering", default_open=True):
 
