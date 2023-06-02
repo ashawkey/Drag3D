@@ -199,7 +199,7 @@ class GUI:
         self.cam = OrbitCamera(opt.W, opt.H, r=opt.radius, fovy=opt.fovy)
         self.bg_color = torch.ones(3, dtype=torch.float32) # default white bg
         self.light_dir = np.array([0, 0])
-        self.mode = 'albedo'
+        self.mode = 'lambertian'
         self.ambient_ratio = 0.5
         self.save_path = 'mesh.obj'
 

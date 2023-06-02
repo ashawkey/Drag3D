@@ -62,6 +62,7 @@ In GUI, you could check `bbox loss` and adjust the bounding box to constrain the
 The part **outside the bounding box** will be encouraged to remain unchanged. 
 
 The learning rate and loss weight can be adjusted in GUI to achieve a balance.
+Usually, a large lr (0.01) is required when applying bbox loss to make the drag point move.
 
 
 ## Acknowledgement
