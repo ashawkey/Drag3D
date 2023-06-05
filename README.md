@@ -6,6 +6,12 @@ A GUI is implemented for demonstration:
 
 https://github.com/ashawkey/Drag3D/assets/25863658/d7ea4e07-d6d1-44e3-b7b6-3c2fd3dc1a0f
 
+https://github.com/ashawkey/Drag3D/assets/25863658/ea3d952e-17f8-4d94-b39f-a58aba499b73
+
+https://github.com/ashawkey/Drag3D/assets/25863658/c9319741-d90c-41b6-a9ef-bbc66bf80e74
+
+Thanks [@SteveJunGao](https://github.com/SteveJunGao) for helping to create the demo video for animals!
+
 ## Install
 ```bash
 # download
