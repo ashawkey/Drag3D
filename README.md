@@ -4,11 +4,11 @@ This project extends the idea of [DragGAN](https://github.com/XingangPan/DragGAN
 
 A GUI is implemented for demonstration:
 
-https://github.com/ashawkey/Drag3D/assets/25863658/d7ea4e07-d6d1-44e3-b7b6-3c2fd3dc1a0f
+https://github.com/ashawkey/Drag3D/assets/25863658/b7ef85f9-d742-4021-a1f4-757f46789ea3
 
-https://github.com/ashawkey/Drag3D/assets/25863658/ea3d952e-17f8-4d94-b39f-a58aba499b73
+https://github.com/ashawkey/Drag3D/assets/25863658/c8ee4f40-1fbc-4a12-b03e-1f8cc62b6f18
 
-https://github.com/ashawkey/Drag3D/assets/25863658/c9319741-d90c-41b6-a9ef-bbc66bf80e74
+https://github.com/ashawkey/Drag3D/assets/25863658/33d5e06d-8ceb-453d-b937-9d4d6b3fced8
 
 Thanks [@SteveJunGao](https://github.com/SteveJunGao) for helping to create the demo video for animals!
 
